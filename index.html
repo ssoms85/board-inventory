@@ -62,7 +62,7 @@
     <div class="btn-row">
       <button type="button" class="btn primary" id="btn-cam-toggle">카메라 켜기</button>
       <label class="btn" for="file-scan">사진으로 스캔</label>
-      <input type="file" id="file-scan" accept="image/*" capture="environment" hidden>
+      <input type="file" id="file-scan" accept="image/*" hidden>
     </div>
     <form id="manual-form" class="manual" autocomplete="off">
       <input id="manual-input" data-scan="1" type="text" inputmode="text" autocapitalize="characters"
@@ -117,9 +117,12 @@
           <input name="puid" data-scan="1" required autocapitalize="characters" spellcheck="false"
                  placeholder="박스 PUID 바코드 스캔 또는 입력" enterkeyhint="next">
           <button type="button" class="btn icon" data-cam-for="puid" title="카메라로 스캔">📷</button>
+          <label class="btn icon" for="file-add" title="사진 찍어 인식 (라벨의 바코드를 모두 읽고 PUID 를 골라냄)">🖼</label>
         </div>
       </label>
+      <input type="file" id="file-add" accept="image/*" hidden>
       <div class="mono-preview" id="add-puid-preview"></div>
+      <div id="add-photo-codes"></div>
       <div class="grid2">
         <label>LOT <input name="lot" autocapitalize="characters" spellcheck="false"></label>
         <label>DATE (YYWW) <input name="date" inputmode="numeric" maxlength="4"></label>
@@ -222,6 +225,7 @@
 
 <script src="vendor/html5-qrcode.min.js"></script>
 <script src="vendor/qrcode.js"></script>
+<script src="vendor/zxing-reader.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

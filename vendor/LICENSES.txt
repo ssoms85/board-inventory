@@ -1,0 +1,4 @@
+zxing-wasm 3.1.6 (reader, iife) — MIT License, Copyright (c) 2023 Ze-Zheng Wu — https://github.com/Sec-ant/zxing-wasm
+내부 엔진: zxing-cpp (Apache-2.0)
+html5-qrcode 2.3.8 — Apache-2.0
+qrcode-generator 1.4.4 — MIT

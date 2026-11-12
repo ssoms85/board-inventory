@@ -1,9 +1,9 @@
 /* 오프라인 실행용 서비스 워커: 같은 출처 파일은 네트워크 우선, 실패 시 캐시.
  * Apps Script 호출(다른 출처)은 건드리지 않는다. */
-const CACHE = 'board-inv-v1.0.0';
+const CACHE = 'board-inv-v1.1.0';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
-  'vendor/html5-qrcode.min.js', 'vendor/qrcode.js',
+  'vendor/html5-qrcode.min.js', 'vendor/qrcode.js', 'vendor/zxing-reader.js', 'vendor/zxing_reader.wasm',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

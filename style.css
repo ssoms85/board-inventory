@@ -242,3 +242,10 @@ details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; pa
   .label .l-sub { font-size: 7pt; }
   .label .mono .d { color: #000; }
 }
+
+/* 사진에서 읽은 바코드 목록 */
+.photo-codes ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.photo-codes li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 14px; word-break: break-all; }
+.tag { display: inline-block; flex: none; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--line); color: var(--text); }
+.pick-list { display: grid; gap: 8px; margin: 10px 0; }
+.pick-list .btn { font-size: 18px; justify-content: center; }

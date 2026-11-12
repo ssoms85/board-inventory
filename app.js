@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const OUT_TYPES = ['팀내', '타팀', '외부', '증정'];
 const STATUSES = ['재고', '분출'];
 const CSV_HEADERS = ['관리번호', 'PUID', 'LOT', 'DATE', '수량', '상태', '분출구분', '수령자', '소속/팀', '분출일', '비고', '물류라벨 일시', '물류라벨 번호'];
@@ -244,6 +244,9 @@ function parseScan(raw) {
         break;
       }
     }
+    // 앞에 데이터 식별자가 붙은 PUID (예: 3S2WCNAOTR240303)
+    const m = up(seg).match(/^\d{0,3}[A-Z](.{8,})$/);
+    if (m && !derive(up(seg)) && derive(m[1])) tokens.add(m[1]);
   }
   return { raw: s, tokens: [...tokens].filter((t) => t.length >= 2), fields };
 }
@@ -321,7 +324,8 @@ function beep() {
   } catch { /* 소리 없음 */ }
 }
 
-async function scanFile(file) {
+/** html5-qrcode 로 사진 1장에서 바코드 1개만 읽는다 (zxing-wasm 을 못 쓸 때의 대체 경로) */
+async function scanFileLegacy(file) {
   if (!window.Html5Qrcode) throw new Error('스캐너 라이브러리를 불러오지 못했습니다');
   const tmpId = 'scan-file-tmp';
   let el = document.getElementById(tmpId);
@@ -329,6 +333,93 @@ async function scanFile(file) {
   const inst = new Html5Qrcode(tmpId, { formatsToSupport: Cam.formats(), verbose: false });
   try { return await inst.scanFile(file, false); } finally { try { inst.clear(); } catch { /* */ } }
 }
+
+/* ------------------------------------------------------------------ 사진 인식 (바코드 여러 개)
+ * 박스 라벨에는 CODENO·PUID·LOT·DATE 바코드가 함께 있다. 바코드 1개만 읽는 방식은 PUID 가 아닌
+ * 바코드를 먼저 잡기 쉬워서, 한 장에 있는 바코드를 모두 읽은 뒤 PUID 를 골라낸다.
+ * 엔진: zxing-wasm(zxing-cpp). 해상도를 바꿔 가며, 그래도 없으면 사진을 조각내어 다시 찾는다.
+ */
+const ZX_FORMATS = ['Code128', 'DataMatrix', 'QRCode', 'Code39', 'Code93', 'EAN13', 'EAN8', 'UPCA', 'ITF', 'PDF417', 'MicroQRCode'];
+let zxPrepared = false;
+function zxLib() {
+  const Z = window.ZXingWASM;
+  if (!Z) return null;
+  if (!zxPrepared) {
+    Z.prepareZXingModule({ overrides: { locateFile: (p, prefix) => (p.endsWith('.wasm') ? new URL('vendor/' + p, location.href).href : prefix + p) } });
+    zxPrepared = true;
+  }
+  return Z;
+}
+async function loadImage(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* 아래 방식으로 */ }
+  }
+  const url = URL.createObjectURL(file);
+  try { const img = new Image(); img.src = url; await img.decode(); return img; } finally { URL.revokeObjectURL(url); }
+}
+/** 이미지(또는 그 일부)를 긴 변 maxSide 픽셀로 맞춘 ImageData */
+function pixels(src, maxSide, c, allowUp = false) {
+  c = c || { x: 0, y: 0, w: src.width, h: src.height };
+  let k = maxSide / Math.max(c.w, c.h);
+  if (!allowUp) k = Math.min(1, k);
+  const w = Math.max(1, Math.round(c.w * k)), h = Math.max(1, Math.round(c.h * k));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, c.x, c.y, c.w, c.h, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
+}
+/** 찾던 값(PUID 형식 또는 등록된 관리번호·PUID)이 읽혔는가 */
+function hasKeyCode(texts) {
+  return texts.some((t) => parseScan(t).tokens.some((k) => derive(k) || byId(k) || S.boards.some((b) => b.puid === k)));
+}
+/** 사진 → [{ text, format }] (중복 제거). 진행 상황은 onStep(설명) 으로 알린다. */
+async function readPhotoCodes(file, onStep = () => {}) {
+  const Z = zxLib();
+  if (!Z) return [{ text: await scanFileLegacy(file), format: '' }];
+  const img = await loadImage(file);
+  const found = new Map();
+  const texts = () => [...found.keys()];
+  const run = async (data, opts = {}) => {
+    const rs = await Z.readBarcodes(data, { formats: ZX_FORMATS, tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true, maxNumberOfSymbols: 32, ...opts });
+    for (const r of rs) if (r.isValid && r.text && !found.has(r.text)) found.set(r.text, r.format);
+  };
+  try {
+    if ('BarcodeDetector' in window) { // 안드로이드 Chrome 의 기본 인식기 (있으면 함께 사용)
+      try { for (const r of await new window.BarcodeDetector().detect(img)) if (r.rawValue && !found.has(r.rawValue)) found.set(r.rawValue, r.format); } catch { /* 없음 */ }
+    }
+    onStep('사진 인식 중…');
+    await run(pixels(img, 2000));
+    if (!hasKeyCode(texts())) { onStep('원본 해상도로 다시 찾는 중…'); await run(pixels(img, 4096)); }
+    if (!hasKeyCode(texts())) { // 작은 바코드: 사진을 겹치게 9조각 내어 확대
+      onStep('사진을 나누어 찾는 중…');
+      const W = img.width, H = img.height;
+      outer: for (const fy of [0, 0.25, 0.5]) for (const fx of [0, 0.25, 0.5]) {
+        await run(pixels(img, 2400, { x: fx * W, y: fy * H, w: W / 2, h: H / 2 }, true));
+        if (hasKeyCode(texts())) break outer;
+      }
+    }
+    if (!hasKeyCode(texts())) await run(pixels(img, 2000), { binarizer: 'GlobalHistogram' });
+  } finally { if (img.close) img.close(); }
+  return [...found].map(([text, format]) => ({ text, format }));
+}
+
+/** 읽은 값이 무엇인지 (화면 표시용) */
+function codeKind(text) {
+  const p = parseScan(text);
+  for (const t of p.tokens) if (byId(t)) return '관리번호';
+  if (p.tokens.some((t) => derive(t))) return 'PUID';
+  if (p.fields.lot || p.tokens.some(isLotLike)) return 'LOT';
+  if (p.tokens.some((t) => t === up(S.settings.dCodeno) || S.boards.some((b) => b.codeno === t))) return 'CODENO';
+  if (/^\d{4}$/.test(p.tokens[0] || '')) return 'DATE?';
+  return '기타';
+}
+const isLotLike = (t) => /^[A-Z0-9]{4}\d{4,}$/.test(t) && /[A-Z]/.test(t);
+function codesListHtml(codes) {
+  if (!codes.length) return '';
+  return `<details class="more photo-codes"><summary>사진에서 읽은 바코드 ${codes.length}개</summary><ul>${codes.map((c) => `<li><span class="tag">${esc(codeKind(c.text))}</span>${mono(up(c.text).replace(/[\x00-\x1f]/g, ' '))}</li>`).join('')}</ul></details>`;
+}
+const PHOTO_FAIL = '사진에서 바코드를 찾지 못했습니다. 라벨이 화면에 크게, 흔들림 없이, 빛 반사 없이 나오게 다시 찍어 보세요.';
 
 /* ------------------------------------------------------------------ 바코드리더기 (키보드 웨지)
  * 입력칸 밖에서 빠르게 연속 입력되고 Enter/Tab 으로 끝나면 스캔으로 처리한다.
@@ -586,7 +677,7 @@ function handleScan(raw, src = 'manual') {
   const r = lookup(raw);
   if (S.scanMode === 'audit') return auditScan(r);
   const el = $('#scan-result');
-  const rawLine = `<div class="raw">${src === 'camera' ? '카메라' : src === 'reader' ? '리더기' : '입력'}: ${esc(r.p.raw)}</div>`;
+  const rawLine = `<div class="raw">${src === 'camera' ? '카메라' : src === 'photo' ? '사진' : src === 'reader' ? '리더기' : '입력'}: ${esc(r.p.raw)}</div>`;
   if (r.kind === 'id' || r.kind === 'puid') {
     const b = r.boards[0];
     el.innerHTML = `<div class="result-card ${r.warn ? 'warn' : ''}">
@@ -654,19 +745,92 @@ function fillAddFromScan(raw) {
   const p = parseScan(raw);
   const f = $('#add-form');
   const puid = p.tokens.find((t) => derive(t));
+  const lot = p.fields.lot || p.tokens.find(isLotLike);
+  const kind = codeKind(raw);
   if (puid) {
     f.puid.value = puid;
-  } else if (p.fields.lot) {
-    f.lot.value = p.fields.lot;
-    if (p.fields.date) f.date.value = p.fields.date;
-    toast('LOT 바코드를 읽었습니다. PUID 를 스캔하세요.');
-  } else if (byId(p.tokens[0])) {
+  } else if (lot) {
+    fillLotOnly(lot, p.fields.date);
+    toast('LOT 바코드를 읽었습니다. PUID 바코드를 스캔하거나 PUID 앞 2글자를 입력하세요.', '', 5000);
+    return;
+  } else if (kind === '관리번호') {
     toast(`${up(p.tokens[0])} 은(는) 이미 등록된 보드입니다`, 'err');
+    return;
+  } else if (kind === 'CODENO') {
+    toast('품목코드(CODENO) 바코드입니다. 박스의 PUID 바코드를 스캔하세요.', 'err', 5000);
     return;
   } else {
     f.puid.value = p.tokens[0] || '';
   }
   onPuidChange();
+}
+/** PUID 는 못 읽고 LOT 만 읽었을 때: PUID = 앞 2글자 + CN + LOT 이므로 뒤쪽을 채워 두고 앞 2글자만 입력받는다 */
+function fillLotOnly(lot, date) {
+  const f = $('#add-form');
+  lot = up(lot);
+  f.lot.value = lot;
+  f.date.value = date || (/^\d{4}$/.test(lot.slice(4, 8)) ? lot.slice(4, 8) : '');
+  const cur = up(f.puid.value);
+  if (!derive(cur) || cur.slice(4) !== lot) f.puid.value = 'CN' + lot;
+  updateAddCheck();
+  if (f.puid.value === 'CN' + lot) { f.puid.focus(); try { f.puid.setSelectionRange(0, 0); } catch { /* */ } }
+}
+function puidCandidates(codes) {
+  const set = new Set();
+  for (const c of codes) for (const t of parseScan(c.text).tokens) if (derive(t)) set.add(t);
+  return [...set];
+}
+const isRegisteredPuid = (p) => S.boards.find((b) => b.puid && loose(b.puid) === loose(p));
+/** 사진 → 입고 화면 */
+async function photoToAdd(file) {
+  const f = $('#add-form');
+  const box = $('#add-photo-codes');
+  box.innerHTML = '<p class="muted small" id="photo-step">사진 인식 중…</p>';
+  let codes = [];
+  try { codes = await readPhotoCodes(file, (s) => { const el = $('#photo-step'); if (el) el.textContent = s; }); } catch { /* 아래에서 안내 */ }
+  box.innerHTML = codesListHtml(codes);
+  if (!codes.length) return toast(PHOTO_FAIL, 'err', 7000);
+  const cands = puidCandidates(codes);
+  const fresh = cands.filter((p) => !isRegisteredPuid(p));
+  if (fresh.length > 1) {
+    openModal(`<h2>PUID 선택</h2><p class="muted small">사진에 등록 안 된 PUID 가 ${fresh.length}개 있습니다. 이번에 등록할 것을 고르세요.</p>
+      <div class="pick-list">${fresh.map((p) => `<button type="button" class="btn wide" data-act="pick-puid" data-puid="${esc(p)}">${mono(p)}</button>`).join('')}</div>
+      <div class="btn-row"><button type="button" class="btn" data-close="1">닫기</button></div>`);
+    return;
+  }
+  if (cands.length) {
+    f.puid.value = fresh[0] || cands[0];
+    onPuidChange();
+    toast(fresh.length ? `PUID ${f.puid.value} 인식 (바코드 ${codes.length}개 중)` : `PUID ${f.puid.value} 는 이미 등록된 보드입니다`, fresh.length ? 'ok' : 'err', 4000);
+    return;
+  }
+  const lot = codes.map((c) => parseScan(c.text)).map((p) => p.fields.lot || p.tokens.find(isLotLike)).find(Boolean);
+  if (lot) {
+    fillLotOnly(lot);
+    toast('PUID 바코드는 못 읽고 LOT 만 읽었습니다. PUID 앞 2글자를 입력하거나 PUID 바코드가 크게 나오게 다시 찍어 보세요.', 'err', 7000);
+    return;
+  }
+  toast(`PUID 바코드를 찾지 못했습니다 (읽은 것: ${codes.map((c) => codeKind(c.text)).join(', ')}). PUID 바코드가 크게 나오게 다시 찍어 보세요.`, 'err', 7000);
+}
+/** 사진 → 스캔 화면 (조회·실사) */
+async function photoToScan(file) {
+  const el = $('#scan-result');
+  el.innerHTML = '<div class="result-card"><p class="muted" id="photo-step">사진 인식 중…</p></div>';
+  let codes = [];
+  try { codes = await readPhotoCodes(file, (s) => { const p = $('#photo-step'); if (p) p.textContent = s; }); } catch { /* 아래에서 안내 */ }
+  if (!codes.length) { el.innerHTML = ''; return toast(PHOTO_FAIL, 'err', 7000); }
+  const rs = codes.map((c) => ({ c, r: lookup(c.text) }));
+  const boardHits = rs.filter((x) => x.r.kind === 'id' || x.r.kind === 'puid');
+  if (S.scanMode === 'audit' && boardHits.length) {
+    const seen = new Set();
+    for (const x of boardHits) if (!seen.has(x.r.boards[0].id)) { seen.add(x.r.boards[0].id); auditScan(x.r); }
+    if (seen.size > 1) toast(`사진에서 보드 ${seen.size}대 확인: ${[...seen].join(', ')}`, 'ok', 5000);
+  } else {
+    const score = (r) => ({ id: 0, puid: 0, lot: 3, codeno: 4 }[r.kind] ?? (r.newPuid ? 1 : 5));
+    rs.sort((a, b) => score(a.r) - score(b.r));
+    handleScan(rs[0].c.text, 'photo');
+  }
+  el.insertAdjacentHTML('beforeend', codesListHtml(codes));
 }
 function onPuidChange() {
   const f = $('#add-form');
@@ -682,6 +846,7 @@ function updateAddCheck() {
   const puid = up(f.puid.value), lot = up(f.lot.value);
   hint.className = 'hint';
   if (!puid) { hint.textContent = ''; return; }
+  if (lot && puid === 'CN' + lot) { hint.textContent = 'PUID 앞 2글자만 입력하세요 (PUID = 앞 2글자 + CN + LOT). 박스 라벨의 PUID 글자를 보고 0/O, 1/I 를 구분해 입력합니다.'; hint.classList.add('bad'); return; }
   const dupP = S.boards.find((b) => b.puid === puid || loose(b.puid) === loose(puid));
   if (dupP) { hint.textContent = `이미 등록된 PUID 입니다 → ${dupP.id}${dupP.puid !== puid ? ' (0/O·1/I 차이만 있음)' : ''}`; hint.classList.add('bad'); return; }
   if (puid.slice(2) === 'CN' + lot) {
@@ -708,15 +873,23 @@ function submitAdd(e) {
   for (const k of ['puid', 'lot', 'date', 'note', 'labelTime', 'labelNo']) f[k].value = '';
   f.qty.value = 1;
   f.id.value = nextId();
+  $('#add-photo-codes').innerHTML = '';
   updateAddCheck();
   if (cont) f.puid.focus(); else show('list');
 }
 
-/* 모달 카메라 (입고 PUID 스캔) */
-function openCamModal(onCode) {
+/* 모달 카메라 (입고 PUID 스캔): PUID 가 아닌 바코드(CODENO·LOT 등)는 알려 주기만 하고 계속 찾는다 */
+function openCamModal(onCode, accept = () => true, onOther = () => {}) {
   openModal(`<h2>바코드 스캔</h2><div class="cam-box on"><div id="cam-modal" class="cam"></div></div>
-    <p class="muted small">박스의 PUID 바코드를 화면 가운데에 맞추세요.</p>`);
-  Cam.start('cam-modal', (t) => { closeModal(); onCode(t); }).catch((e) => { closeModal(); toast(e.message, 'err', 6000); });
+    <p class="small" id="cam-modal-msg">박스의 <b>PUID</b> 바코드를 화면 가운데에 맞추세요.</p>
+    <p class="muted small">작은 바코드가 안 잡히면 <b>사진 찍어 인식</b>이 더 잘 됩니다 (폰 카메라 앱의 고해상도·초점 사용).</p>
+    <div class="btn-row"><label class="btn primary" for="file-add">사진 찍어 인식</label><button type="button" class="btn" data-close="1">닫기</button></div>`);
+  Cam.start('cam-modal', (t) => {
+    if (accept(t)) { closeModal(); onCode(t); return; }
+    onOther(t);
+    const m = $('#cam-modal-msg');
+    if (m) m.innerHTML = `읽음: ${mono(up(t).replace(/[\x00-\x1f]/g, ' ').slice(0, 40))} <span class="tag">${esc(codeKind(t))}</span><br>이 바코드가 아닙니다. <b>PUID</b> 바코드를 비추세요.`;
+  }).catch((e) => { closeModal(); toast(e.message, 'err', 6000); });
 }
 
 /* ------------------------------------------------------------------ 설정 */
@@ -911,6 +1084,7 @@ function bind() {
       else if (a.dataset.act === 'return') openReturn(id);
       else if (a.dataset.act === 'edit') openEdit(id);
       else if (a.dataset.act === 'label') { const b = byId(id); if (b) printLabels([b]); }
+      else if (a.dataset.act === 'pick-puid') { closeModal(); $('#add-form').puid.value = a.dataset.puid; onPuidChange(); toast(`PUID ${a.dataset.puid} 선택`, 'ok'); }
       else if (a.dataset.act === 'new') { show('add'); $('#add-form').puid.value = a.dataset.puid; onPuidChange(); }
       return;
     }
@@ -931,7 +1105,7 @@ function bind() {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
-    try { handleScan(await scanFile(file), 'camera'); } catch { toast('사진에서 바코드를 찾지 못했습니다. 가까이·밝게 다시 찍어 보세요.', 'err', 5000); }
+    photoToScan(file);
   });
   $('#manual-form').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -978,7 +1152,17 @@ function bind() {
   });
   af.lot.addEventListener('input', updateAddCheck);
   af.date.addEventListener('input', updateAddCheck);
-  $$('[data-cam-for]').forEach((b) => b.addEventListener('click', () => openCamModal((t) => fillAddFromScan(t))));
+  $$('[data-cam-for]').forEach((b) => b.addEventListener('click', () => openCamModal(
+    (t) => fillAddFromScan(t),
+    (t) => puidCandidates([{ text: t }]).length > 0,
+    (t) => { const p = parseScan(t); const lot = p.fields.lot || p.tokens.find(isLotLike); if (lot) fillLotOnly(lot, p.fields.date); },
+  )));
+  $('#file-add').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!$('#modal').hidden) closeModal();
+    if (file) photoToAdd(file);
+  });
 
   // 설정
   $('#settings-form').addEventListener('submit', saveSettings);
