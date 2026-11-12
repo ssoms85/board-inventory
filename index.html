@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F4E78">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="보드재고">
+<title>보드 재고관리</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img src="icons/icon-192.png" alt="" width="28" height="28">
+    <span>보드 재고관리</span>
+  </div>
+  <button id="sync-badge" class="sync-badge" type="button" title="동기화 상태 — 눌러서 새로고침">로컬</button>
+</header>
+
+<main id="main">
+  <!-- 현황 -->
+  <section id="view-dash" class="view">
+    <div class="stat-row">
+      <div class="stat"><div class="stat-label">총 입고</div><div class="stat-num" id="st-all">0</div></div>
+      <div class="stat stock"><div class="stat-label">현재 재고</div><div class="stat-num" id="st-stock">0</div></div>
+      <div class="stat out"><div class="stat-label">분출 누계</div><div class="stat-num" id="st-out">0</div></div>
+    </div>
+    <div id="st-check" class="check-line"></div>
+
+    <h2>분출구분별</h2>
+    <table class="tbl" id="tbl-outtype"><thead><tr><th>분출구분</th><th>수량</th></tr></thead><tbody></tbody></table>
+
+    <h2>LOT별</h2>
+    <div class="tbl-wrap">
+      <table class="tbl" id="tbl-lot"><thead><tr><th>LOT</th><th>입고</th><th>재고</th><th>분출</th><th>제조시기</th></tr></thead><tbody></tbody></table>
+    </div>
+
+    <h2>최근 이력</h2>
+    <ul class="history" id="dash-history"></ul>
+  </section>
+
+  <!-- 스캔 -->
+  <section id="view-scan" class="view" hidden>
+    <div class="seg" role="tablist">
+      <button type="button" class="seg-btn active" data-scanmode="lookup">조회·분출·반납</button>
+      <button type="button" class="seg-btn" data-scanmode="audit">재고 실사</button>
+    </div>
+
+    <div class="cam-box">
+      <div id="cam-scan" class="cam"></div>
+      <div class="cam-placeholder" id="cam-scan-ph">
+        <p>카메라로 박스 바코드(PUID) 또는 관리번호 QR 라벨을 비추세요.</p>
+        <p class="muted">USB·블루투스 바코드리더기는 이 화면에서 그대로 쏘면 됩니다.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button type="button" class="btn primary" id="btn-cam-toggle">카메라 켜기</button>
+      <label class="btn" for="file-scan">사진으로 스캔</label>
+      <input type="file" id="file-scan" accept="image/*" capture="environment" hidden>
+    </div>
+    <form id="manual-form" class="manual" autocomplete="off">
+      <input id="manual-input" data-scan="1" type="text" inputmode="text" autocapitalize="characters"
+             placeholder="직접 입력 / 리더기 입력 (관리번호·PUID·LOT)" enterkeyhint="search">
+      <button class="btn" type="submit">찾기</button>
+    </form>
+
+    <div id="scan-result"></div>
+
+    <div id="audit-panel" hidden>
+      <div class="audit-head">
+        <div><b id="audit-count">0 / 0</b> 재고 확인</div>
+        <div class="btn-row tight">
+          <button type="button" class="btn small" id="btn-audit-save">실사 기록</button>
+          <button type="button" class="btn small" id="btn-audit-reset">초기화</button>
+        </div>
+      </div>
+      <div class="progress"><div id="audit-bar"></div></div>
+      <h3>미확인 재고 <span id="audit-missing-n" class="muted"></span></h3>
+      <ul class="mini-list" id="audit-missing"></ul>
+      <h3>확인됨</h3>
+      <ul class="mini-list" id="audit-found"></ul>
+    </div>
+  </section>
+
+  <!-- 대장 -->
+  <section id="view-list" class="view" hidden>
+    <div class="search-row">
+      <input id="list-q" type="search" placeholder="관리번호·PUID·LOT·수령자·팀 검색" autocomplete="off">
+    </div>
+    <div class="chips" id="list-filter">
+      <button type="button" class="chip active" data-f="all">전체</button>
+      <button type="button" class="chip" data-f="재고">재고</button>
+      <button type="button" class="chip" data-f="분출">분출</button>
+    </div>
+    <div class="list-tools">
+      <span id="list-count" class="muted"></span>
+      <span>
+        <button type="button" class="btn small" id="btn-print-list">라벨 인쇄</button>
+        <button type="button" class="btn small" id="btn-export-list">CSV</button>
+      </span>
+    </div>
+    <ul class="board-list" id="board-list"></ul>
+  </section>
+
+  <!-- 입고 -->
+  <section id="view-add" class="view" hidden>
+    <form id="add-form" class="form" autocomplete="off">
+      <h2>입고 등록</h2>
+      <label>PUID <span class="req">*</span>
+        <div class="input-btn">
+          <input name="puid" data-scan="1" required autocapitalize="characters" spellcheck="false"
+                 placeholder="박스 PUID 바코드 스캔 또는 입력" enterkeyhint="next">
+          <button type="button" class="btn icon" data-cam-for="puid" title="카메라로 스캔">📷</button>
+        </div>
+      </label>
+      <div class="mono-preview" id="add-puid-preview"></div>
+      <div class="grid2">
+        <label>LOT <input name="lot" autocapitalize="characters" spellcheck="false"></label>
+        <label>DATE (YYWW) <input name="date" inputmode="numeric" maxlength="4"></label>
+      </div>
+      <div class="hint" id="add-check"></div>
+      <div class="grid2">
+        <label>관리번호 <span class="req">*</span> <input name="id" required autocapitalize="characters"></label>
+        <label>수량 <input name="qty" type="number" min="1" value="1"></label>
+      </div>
+      <details class="more">
+        <summary>품목 정보 (기본값: 설정)</summary>
+        <label>품명(모델) <input name="model"></label>
+        <div class="grid2">
+          <label>제조사 <input name="maker"></label>
+          <label>CODENO <input name="codeno" inputmode="numeric"></label>
+        </div>
+        <div class="grid2">
+          <label>물류라벨 일시 <input name="labelTime"></label>
+          <label>물류라벨 번호 <input name="labelNo"></label>
+        </div>
+      </details>
+      <label>비고 <input name="note" placeholder="예: 숫자 2 + 영문 W (확대 확인)"></label>
+      <label class="check"><input type="checkbox" name="cont" checked> 연속 입고 (저장 후 다음 번호로)</label>
+      <div class="btn-row">
+        <button class="btn primary wide" type="submit">입고 저장</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 설정 -->
+  <section id="view-settings" class="view" hidden>
+    <form id="settings-form" class="form" autocomplete="off">
+      <h2>작업자</h2>
+      <label>이름 (이력에 기록) <input name="user" placeholder="예: 홍길동"></label>
+
+      <h2>데이터 연동</h2>
+      <div class="seg">
+        <label class="seg-btn"><input type="radio" name="mode" value="local"> 이 기기에만 저장</label>
+        <label class="seg-btn"><input type="radio" name="mode" value="sheet"> Google 시트</label>
+      </div>
+      <div id="sheet-fields">
+        <label>Apps Script 웹 앱 URL <input name="url" type="url" placeholder="https://script.google.com/macros/s/…/exec" spellcheck="false"></label>
+        <label>접근 토큰 <input name="token" type="password" spellcheck="false" placeholder="Apps Script setup() 실행 결과"></label>
+        <div class="btn-row">
+          <button type="button" class="btn" id="btn-test">연결 테스트</button>
+          <button type="button" class="btn" id="btn-share-qr">팀원 설정 QR</button>
+        </div>
+        <div id="share-qr" class="share-qr" hidden></div>
+      </div>
+
+      <h2>기본 품목</h2>
+      <label>품명(모델) <input name="dModel"></label>
+      <div class="grid2">
+        <label>제조사 <input name="dMaker"></label>
+        <label>CODENO <input name="dCodeno" inputmode="numeric"></label>
+      </div>
+      <label>관리번호 접두어 <input name="dPrefix" autocapitalize="characters"></label>
+
+      <div class="btn-row">
+        <button class="btn primary wide" type="submit">설정 저장</button>
+      </div>
+    </form>
+
+    <div class="form">
+      <h2>데이터</h2>
+      <p class="muted">CSV 형식은 <code>ledger.csv</code>(build_inventory.py 입력)와 같습니다.</p>
+      <div class="btn-row">
+        <label class="btn" for="file-csv">CSV 가져오기</label>
+        <input type="file" id="file-csv" accept=".csv,text/csv" hidden>
+        <button type="button" class="btn" id="btn-export">CSV 내보내기</button>
+        <button type="button" class="btn" id="btn-print-all">전체 라벨 인쇄</button>
+      </div>
+      <div class="btn-row">
+        <button type="button" class="btn danger" id="btn-reset">이 기기 데이터 지우기</button>
+      </div>
+      <p class="muted small" id="app-info"></p>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button type="button" data-view="dash" class="active"><span class="ti">📊</span>현황</button>
+  <button type="button" data-view="scan"><span class="ti">▣</span>스캔</button>
+  <button type="button" data-view="list"><span class="ti">☰</span>대장</button>
+  <button type="button" data-view="add"><span class="ti">＋</span>입고</button>
+  <button type="button" data-view="settings"><span class="ti">⚙</span>설정</button>
+</nav>
+
+<!-- 모달 -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-bg" data-close="1"></div>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <button type="button" class="sheet-close" data-close="1" aria-label="닫기">✕</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<div id="print-area"></div>
+
+<script src="vendor/html5-qrcode.min.js"></script>
+<script src="vendor/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
