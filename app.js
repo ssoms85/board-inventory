@@ -5,15 +5,18 @@
  */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const OUT_TYPES = ['팀내', '타팀', '외부', '증정'];
 const STATUSES = ['재고', '분출'];
-const CSV_HEADERS = ['관리번호', 'PUID', 'LOT', 'DATE', '수량', '상태', '분출구분', '수령자', '소속/팀', '분출일', '비고', '물류라벨 일시', '물류라벨 번호'];
-const CSV_KEYS = ['id', 'puid', 'lot', 'date', 'qty', 'status', 'outType', 'recipient', 'team', 'outDate', 'note', 'labelTime', 'labelNo'];
+// 앞 13열은 ledger.csv(build_inventory.py 입력)와 같은 순서, 뒤 3열은 일반 제품용 품목 정보
+const CSV_HEADERS = ['관리번호', 'PUID', 'LOT', 'DATE', '수량', '상태', '분출구분', '수령자', '소속/팀', '분출일', '비고', '물류라벨 일시', '물류라벨 번호', '품명(모델)', '제조사', 'CODENO'];
+const CSV_KEYS = ['id', 'puid', 'lot', 'date', 'qty', 'status', 'outType', 'recipient', 'team', 'outDate', 'note', 'labelTime', 'labelNo', 'model', 'maker', 'codeno'];
 const DEFAULT_SETTINGS = {
   user: '', mode: 'local', url: '', token: '',
   dModel: 'FRDM-MCXN947', dMaker: 'NXP', dCodeno: '935455837598', dPrefix: 'MCXN',
+  gPrefix: 'ITEM', blankMark: '', addKind: 'board',
 };
+const BLANK_FIELDS = ['model', 'maker', 'codeno', 'puid', 'lot']; // 입고 때 비어 있으면 '없음' 으로 채울 수 있는 칸
 const LS = { boards: 'inv.boards', history: 'inv.history', outbox: 'inv.outbox', settings: 'inv.settings', audit: 'inv.audit', sync: 'inv.lastSync' };
 
 /* ------------------------------------------------------------------ 유틸 */
@@ -47,8 +50,14 @@ function derive(puid) {
   const date = /^\d{4}$/.test(lot.slice(4, 8)) ? lot.slice(4, 8) : '';
   return { lot, date };
 }
+/** 비어 있거나 '없음' 이면 값이 없는 것으로 본다 */
+const blank = (v) => { const t = String(v ?? '').trim(); return !t || t === '없음'; };
+const val = (v) => (blank(v) ? '' : String(v).trim());
+/** 제품 바코드 비교용: 숫자 바코드는 앞자리 0 무시 (GTIN-14 ↔ EAN-13) */
+const gkey = (v) => { const t = up(v); return /^\d+$/.test(t) ? t.replace(/^0+/, '') : t; };
+const isPuidLike = (v) => up(v).slice(2, 4) === 'CN';
 function puidCheck(b) {
-  if (!b.puid) return '';
+  if (blank(b.puid) || !isPuidLike(b.puid)) return '';
   return up(b.puid).slice(2) === 'CN' + up(b.lot) ? 'OK' : '확인';
 }
 function mfgOf(date) {
@@ -79,18 +88,17 @@ const byId = (id) => S.boards.find((b) => up(b.id) === up(id));
 const sortBoards = () => S.boards.sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }));
 
 function normBoard(b) {
-  const s = S.settings;
   return {
-    id: up(b.id), model: (b.model || s.dModel || '').trim(), maker: (b.maker || s.dMaker || '').trim(),
-    codeno: String(b.codeno || s.dCodeno || '').trim(), puid: up(b.puid), lot: up(b.lot), date: String(b.date || '').trim(),
+    id: up(b.id), model: String(b.model || '').trim(), maker: String(b.maker || '').trim(),
+    codeno: String(b.codeno || '').trim(), puid: up(b.puid), lot: up(b.lot), date: String(b.date || '').trim(),
     qty: Math.max(1, parseInt(b.qty, 10) || 1), status: STATUSES.includes(b.status) ? b.status : '재고',
     outType: (b.outType || '').trim(), recipient: (b.recipient || '').trim(), team: (b.team || '').trim(),
     outDate: (b.outDate || '').trim(), note: (b.note || '').trim(), labelTime: (b.labelTime || '').trim(), labelNo: (b.labelNo || '').trim(),
   };
 }
 
-function nextId() {
-  const prefix = up(S.settings.dPrefix || 'BRD');
+function nextId(prefix = addKind() === 'general' ? S.settings.gPrefix : S.settings.dPrefix) {
+  prefix = up(prefix || 'ITEM');
   let max = 0;
   for (const b of S.boards) {
     const m = b.id.match(new RegExp('^' + prefix.replace(/[^A-Z0-9]/g, '') + '-(\\d+)$'));
@@ -160,7 +168,7 @@ async function flush() {
       const op = S.outbox[0];
       let r;
       try {
-        r = await Api.call({ action: op.type, opId: op.opId, id: op.id, board: op.board, fields: op.fields, expect: op.expect, act: op.action, detail: op.detail, user: op.user });
+        r = await Api.call({ action: op.type, opId: op.opId, id: op.id, board: op.board, fields: op.fields, expect: op.expect, split: op.split, act: op.action, detail: op.detail, user: op.user });
       } catch (e) {
         setSync(e.kind === 'network' ? 'offline' : 'error', e.message);
         return;
@@ -224,51 +232,149 @@ function setSync(state, msg = '') {
 }
 
 /* ------------------------------------------------------------------ 스캔 해석 */
-// ANSI MH10.8.2 데이터 식별자 (물류 라벨에 흔한 것)
-const DI = [['1T', 'lot'], ['10D', 'date'], ['9D', 'date'], ['30P', 'part'], ['1P', 'part'], ['P', 'part'], ['Q', 'qty'], ['4L', 'origin'], ['1S', 'serial'], ['S', 'serial'], ['K', 'order'], ['33T', 'serial2']];
+// ANSI MH10.8.2 데이터 식별자. 한 글자 DI(P·S·K)는 2D 묶음(ISO 15434) 안에서만 믿는다.
+const DI = [['33T', 'puid'], ['30P', 'model'], ['1T', 'lot'], ['16D', 'date'], ['14D', 'expiry'], ['10D', 'date'], ['9D', 'date'],
+  ['1P', 'codeno'], ['4L', 'origin'], ['3S', 'puid'], ['1S', 'puid'], ['Q', 'qty'], ['P', 'codeno'], ['S', 'puid'], ['K', 'order']];
+// GS1 응용 식별자(AI) → 앱 필드
+const GS1_MAP = { '01': 'codeno', '02': 'codeno', '10': 'lot', '11': 'date', '15': 'expiry', '17': 'expiry', '21': 'puid', '30': 'qty', '37': 'qty', '240': 'codeno', '241': 'codeno', '400': 'order' };
+const GS1_FIXED = { '00': 18, '01': 14, '02': 14, '03': 14, '11': 6, '12': 6, '13': 6, '15': 6, '16': 6, '17': 6, '18': 6, '19': 6, '20': 2, '31': 6, '32': 6, '33': 6, '34': 6, '35': 6, '36': 6, '41': 13 };
 
-function parseScan(raw) {
-  let s = String(raw || '').replace(/\r|\n/g, '').trim();
-  s = s.replace(/^\][A-Za-z][0-9A-Za-z]/, ''); // AIM 심볼 식별자
-  s = s.replace(/^\[\)>[\x1e]?\d\d[\x1d]?/, ''); // ISO 15434 헤더
+/** 숫자 바코드 체크 숫자(mod 10) 확인: EAN-8/UPC-A/EAN-13/GTIN-14 */
+function gtinOk(t) {
+  if (!/^(\d{8}|\d{12}|\d{13}|\d{14})$/.test(t)) return false;
+  let sum = 0;
+  for (let i = t.length - 2, w = 3; i >= 0; i--, w = 4 - w) sum += +t[i] * w;
+  return (10 - (sum % 10)) % 10 === +t[t.length - 1];
+}
+/** GS1 문자열 → { AI: 값 } 또는 null. 괄호형 (01)…(10)… 과 FNC1(GS) 구분형 모두 */
+function gs1Parse(s, aim) {
+  if (/^\(\d{2,4}\)/.test(s)) {
+    const out = {};
+    for (const m of s.matchAll(/\((\d{2,4})\)([^(]*)/g)) out[m[1]] = m[2].trim();
+    return Object.keys(out).length ? out : null;
+  }
+  const isGs1 = /^\](C1|e0|d2|Q3|J1)$/.test(aim || '') || (/^01\d{14}/.test(s) && gtinOk(s.slice(2, 16)) && s.length > 16);
+  if (!isGs1) return null;
+  const out = {};
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '\x1d') { i++; continue; }
+    const two = s.substr(i, 2);
+    if (!/^\d\d$/.test(two)) return Object.keys(out).length ? out : null;
+    const n = +two;
+    const aiLen = [23, 24, 25, 40, 41, 42].includes(n) ? 3 : ([31, 32, 33, 34, 35, 36, 39, 70, 71, 72, 80, 81, 82].includes(n) ? 4 : 2);
+    const ai = s.substr(i, aiLen);
+    i += aiLen;
+    const fl = GS1_FIXED[two] || 0;
+    let v;
+    if (fl) { v = s.substr(i, fl); i += fl; } else { const j = s.indexOf('\x1d', i); v = j < 0 ? s.slice(i) : s.slice(i, j); i = j < 0 ? s.length : j + 1; }
+    out[ai] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+const ymd = (v) => (/^\d{6}$/.test(v) ? `20${v.slice(0, 2)}-${v.slice(2, 4)}-${v.slice(4, 6) === '00' ? '01' : v.slice(4, 6)}` : v);
+const ymd8 = (v) => (/^\d{8}$/.test(v) ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : v);
+
+function parseOne(raw, acc) {
+  // zxing 은 제어문자를 기호(␝ ␞ ␄)로 돌려주므로 되돌린다
+  let s = String(raw || '').replace(/[␀-␟]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x2400)).replace(/\r|\n/g, '').trim();
+  const aimM = s.match(/^\][A-Za-z][0-9A-Za-z]/);
+  const aim = aimM ? aimM[0] : '';
+  s = s.slice(aim.length); // AIM 심볼 식별자
+  const env = /^\[\)>/.test(s); // ISO 15434 묶음
+  s = s.replace(/^\[\)>[\x1e]?\d\d[\x1d]?/, '');
+  acc.raws.push(s);
+  acc.tokens.add(up(s));
+  const setF = (k, v) => { if (v && !acc.fields[k]) acc.fields[k] = v; };
+  const gs = gs1Parse(s, aim);
+  if (gs) {
+    acc.structured = true;
+    for (const [ai, v] of Object.entries(gs)) {
+      acc.tokens.add(up(v));
+      const k = GS1_MAP[ai];
+      if (!k) continue;
+      if (k === 'date' || k === 'expiry') setF(k, ymd(v));
+      else if (k === 'codeno') setF(k, ai === '01' || ai === '02' ? v : up(v));
+      else setF(k, k === 'qty' ? String(parseInt(v, 10) || '') : up(v));
+    }
+    return;
+  }
   const segs = s.split(/[\x1d\x1e\x04|]/).map((t) => t.trim()).filter(Boolean);
-  const tokens = new Set([up(s)]);
-  const fields = {};
+  const multi = env || segs.length > 1;
+  if (multi) acc.structured = true;
   for (const seg of segs) {
-    tokens.add(up(seg));
+    const us = up(seg);
+    acc.tokens.add(us);
+    let hit = false;
     for (const [pre, key] of DI) {
-      if (up(seg).startsWith(pre) && seg.length > pre.length) {
-        const v = up(seg.slice(pre.length));
-        tokens.add(v);
-        if (!fields[key]) fields[key] = v;
-        break;
-      }
+      if (!us.startsWith(pre) || us.length <= pre.length) continue;
+      const v = us.slice(pre.length);
+      if (pre.length === 1 && !multi && !(pre === 'Q' && /^\d+$/.test(v))) continue; // 단독 바코드의 한 글자 DI 는 무시
+      acc.tokens.add(v);
+      hit = true;
+      if (key === 'date' || key === 'expiry') setF(key, pre === '16D' || pre === '14D' ? ymd8(v) : v);
+      else if (key === 'qty') setF(key, String(parseInt(v, 10) || ''));
+      else setF(key, key === 'model' ? seg.slice(pre.length).trim() : v);
+      break;
     }
     // 앞에 데이터 식별자가 붙은 PUID (예: 3S2WCNAOTR240303)
-    const m = up(seg).match(/^\d{0,3}[A-Z](.{8,})$/);
-    if (m && !derive(up(seg)) && derive(m[1])) tokens.add(m[1]);
+    const m = us.match(/^\d{0,3}[A-Z](.{8,})$/);
+    if (m && !derive(us) && derive(m[1])) acc.tokens.add(m[1]);
+    if (!hit && !multi) {
+      if (gtinOk(us)) { acc.fields.gtinPlain = acc.fields.gtinPlain || us; }
+      else { const sn = seg.match(/^S\/?N[:\s#-]*(.+)$/i); if (sn) setF('puid', up(sn[1])); else acc.plain.push(us); }
+    }
   }
-  return { raw: s, tokens: [...tokens].filter((t) => t.length >= 2), fields };
+}
+/** 스캔 문자열(또는 사진 한 장에서 읽은 여러 문자열) → { raw, tokens, fields, plain } */
+function parseScan(raw) {
+  const acc = { raws: [], tokens: new Set(), fields: {}, plain: [], structured: false };
+  for (const r of Array.isArray(raw) ? raw : [raw]) parseOne(r, acc);
+  return { raw: acc.raws.map((x) => x.replace(/[\x00-\x1f]/g, ' ').trim()).join(' | '), tokens: [...acc.tokens].filter((t) => t.length >= 2), fields: acc.fields, plain: acc.plain, structured: acc.structured };
 }
 
-/** 스캔 결과 → { kind, boards, token, warn } */
+/** 스캔 → 입고 칸에 넣을 값 (없는 칸은 빈 문자열) */
+function scanFields(raw) {
+  const p = parseScan(raw);
+  const f = p.fields;
+  const out = { codeno: f.codeno || f.gtinPlain || '', model: f.model || '', puid: f.puid || '', lot: f.lot || '', date: f.date || '', qty: f.qty || '', expiry: f.expiry || '' };
+  const puidTok = p.tokens.find((t) => derive(t));
+  if (!out.puid && puidTok) out.puid = puidTok;
+  if (!out.codeno) { const plain = p.plain.find((t) => !derive(t) && !byId(t) && t !== out.puid); if (plain) out.codeno = plain; }
+  if (!out.lot && out.puid && derive(out.puid)) { const d = derive(out.puid); out.lot = d.lot; out.date = out.date || d.date; }
+  return { ...out, p };
+}
+/** 같은 제품 바코드로 전에 등록한 품목 정보 */
+function productInfo(codeno) {
+  if (blank(codeno)) return null;
+  const k = gkey(codeno);
+  const b = [...S.boards].reverse().find((x) => !blank(x.codeno) && gkey(x.codeno) === k && (!blank(x.model) || !blank(x.maker)));
+  return b ? { model: val(b.model), maker: val(b.maker) } : null;
+}
+
+/** 스캔 결과 → { kind: id|puid|product|lot|none, boards, token, warn } */
 function lookup(raw) {
   const p = parseScan(raw);
-  for (const t of p.tokens) { const b = byId(t); if (b) return { kind: 'id', boards: [b], token: t, p }; }
-  for (const t of p.tokens) { const b = S.boards.find((x) => x.puid && x.puid === t); if (b) return { kind: 'puid', boards: [b], token: t, p }; }
-  for (const t of p.tokens) {
-    const b = S.boards.find((x) => x.puid && loose(x.puid) === loose(t));
+  const toks = p.tokens;
+  for (const t of toks) { const b = byId(t); if (b) return { kind: 'id', boards: [b], token: t, p }; }
+  for (const t of toks) { const b = S.boards.find((x) => !blank(x.puid) && x.puid === t); if (b) return { kind: 'puid', boards: [b], token: t, p }; }
+  for (const t of toks) {
+    const b = S.boards.find((x) => !blank(x.puid) && isPuidLike(x.puid) && loose(x.puid) === loose(t));
     if (b) return { kind: 'puid', boards: [b], token: t, p, warn: `스캔값 ${t} 과 대장 PUID ${b.puid} 가 0/O 또는 1/I 만 다릅니다. 대장 표기를 확인하세요.` };
   }
-  for (const t of p.tokens) {
-    const list = S.boards.filter((x) => x.lot && (x.lot === t || loose(x.lot) === loose(t)));
+  for (const t of [p.fields.codeno, p.fields.gtinPlain, ...toks].filter(Boolean)) {
+    let list = S.boards.filter((x) => !blank(x.codeno) && gkey(x.codeno) === gkey(t));
+    if (!list.length) continue;
+    if (p.fields.lot) { const l2 = list.filter((x) => x.lot === p.fields.lot); if (l2.length) list = l2; }
+    return { kind: 'product', boards: list, token: t, p };
+  }
+  for (const t of toks) {
+    const list = S.boards.filter((x) => !blank(x.lot) && (x.lot === t || loose(x.lot) === loose(t)));
     if (list.length) return { kind: 'lot', boards: list, token: t, p };
   }
-  for (const t of p.tokens) {
-    if (S.boards.some((x) => x.codeno && x.codeno === t)) return { kind: 'codeno', boards: [], token: t, p };
-  }
-  const puidTok = p.tokens.find((t) => derive(t));
-  return { kind: 'none', boards: [], token: puidTok || p.tokens[0] || '', p, newPuid: puidTok };
+  const puidTok = toks.find((t) => derive(t));
+  const sf = scanFields(raw);
+  return { kind: 'none', boards: [], token: puidTok || sf.codeno || toks[0] || '', p, newPuid: puidTok };
 }
 
 /* ------------------------------------------------------------------ 카메라 */
@@ -369,12 +475,12 @@ function pixels(src, maxSide, c, allowUp = false) {
   ctx.drawImage(src, c.x, c.y, c.w, c.h, 0, 0, w, h);
   return ctx.getImageData(0, 0, w, h);
 }
-/** 찾던 값(PUID 형식 또는 등록된 관리번호·PUID)이 읽혔는가 */
+/** 찾던 값(PUID 형식 또는 등록된 관리번호·PUID·시리얼)이 읽혔는가 */
 function hasKeyCode(texts) {
-  return texts.some((t) => parseScan(t).tokens.some((k) => derive(k) || byId(k) || S.boards.some((b) => b.puid === k)));
+  return texts.some((t) => parseScan(t).tokens.some((k) => derive(k) || byId(k) || S.boards.some((b) => !blank(b.puid) && b.puid === k)));
 }
 /** 사진 → [{ text, format }] (중복 제거). 진행 상황은 onStep(설명) 으로 알린다. */
-async function readPhotoCodes(file, onStep = () => {}) {
+async function readPhotoCodes(file, onStep = () => {}, isGood = hasKeyCode) {
   const Z = zxLib();
   if (!Z) return [{ text: await scanFileLegacy(file), format: '' }];
   const img = await loadImage(file);
@@ -390,16 +496,16 @@ async function readPhotoCodes(file, onStep = () => {}) {
     }
     onStep('사진 인식 중…');
     await run(pixels(img, 2000));
-    if (!hasKeyCode(texts())) { onStep('원본 해상도로 다시 찾는 중…'); await run(pixels(img, 4096)); }
-    if (!hasKeyCode(texts())) { // 작은 바코드: 사진을 겹치게 9조각 내어 확대
+    if (!isGood(texts())) { onStep('원본 해상도로 다시 찾는 중…'); await run(pixels(img, 4096)); }
+    if (!isGood(texts())) { // 작은 바코드: 사진을 겹치게 9조각 내어 확대
       onStep('사진을 나누어 찾는 중…');
       const W = img.width, H = img.height;
       outer: for (const fy of [0, 0.25, 0.5]) for (const fx of [0, 0.25, 0.5]) {
         await run(pixels(img, 2400, { x: fx * W, y: fy * H, w: W / 2, h: H / 2 }, true));
-        if (hasKeyCode(texts())) break outer;
+        if (isGood(texts())) break outer;
       }
     }
-    if (!hasKeyCode(texts())) await run(pixels(img, 2000), { binarizer: 'GlobalHistogram' });
+    if (!isGood(texts())) await run(pixels(img, 2000), { binarizer: 'GlobalHistogram' });
   } finally { if (img.close) img.close(); }
   return [...found].map(([text, format]) => ({ text, format }));
 }
@@ -407,11 +513,17 @@ async function readPhotoCodes(file, onStep = () => {}) {
 /** 읽은 값이 무엇인지 (화면 표시용) */
 function codeKind(text) {
   const p = parseScan(text);
+  const f = p.fields;
   for (const t of p.tokens) if (byId(t)) return '관리번호';
+  if (p.structured && Object.keys(f).filter((k) => k !== 'gtinPlain').length >= 2) return '묶음(2D)';
   if (p.tokens.some((t) => derive(t))) return 'PUID';
-  if (p.fields.lot || p.tokens.some(isLotLike)) return 'LOT';
-  if (p.tokens.some((t) => t === up(S.settings.dCodeno) || S.boards.some((b) => b.codeno === t))) return 'CODENO';
-  if (/^\d{4}$/.test(p.tokens[0] || '')) return 'DATE?';
+  if (f.puid) return '시리얼';
+  if (f.lot || (!f.codeno && p.tokens.some(isLotLike))) return 'LOT';
+  const code = f.codeno || f.gtinPlain;
+  if (code) return gkey(code) === gkey(S.settings.dCodeno) ? 'CODENO' : '제품 바코드';
+  if (f.model) return '품명';
+  if (f.qty) return '수량';
+  if (f.date || /^\d{4}$/.test(p.tokens[0] || '')) return 'DATE';
   return '기타';
 }
 const isLotLike = (t) => /^[A-Z0-9]{4}\d{4,}$/.test(t) && /[A-Z]/.test(t);
@@ -491,7 +603,14 @@ function renderDash() {
   rows.push(`<tr class="sum"><td>합계</td><td>${c.out}</td></tr>`);
   tb1.innerHTML = rows.join('');
 
-  const lots = [...new Set(S.boards.map((b) => b.lot).filter(Boolean))].sort();
+  const groups = new Map();
+  for (const b of S.boards) { const k = val(b.model) || (val(b.codeno) ? '바코드 ' + b.codeno : '(품명 없음)'); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(b); }
+  $('#tbl-item tbody').innerHTML = [...groups].sort((a, b) => a[0].localeCompare(b[0])).map(([k, list]) => {
+    const g = counts(list);
+    return `<tr><td>${esc(k)}</td><td>${g.all}</td><td>${g.stock}</td><td>${g.out}</td></tr>`;
+  }).join('') + `<tr class="sum"><td>합계</td><td>${c.all}</td><td>${c.stock}</td><td>${c.out}</td></tr>`;
+
+  const lots = [...new Set(S.boards.map((b) => val(b.lot)).filter(Boolean))].sort();
   const tb2 = $('#tbl-lot tbody');
   const lr = lots.map((l) => {
     const k = counts(S.boards.filter((b) => b.lot === l));
@@ -514,15 +633,18 @@ function filteredBoards() {
   return S.boards.filter((b) => {
     if (S.listFilter !== 'all' && b.status !== S.listFilter) return false;
     if (!q) return true;
-    return [b.id, b.puid, b.lot, b.recipient, b.team, b.note, b.outType].some((v) => up(v).includes(q)) || loose(b.puid).includes(loose(q));
+    return [b.id, b.puid, b.lot, b.recipient, b.team, b.note, b.outType, b.model, b.maker, b.codeno].some((v) => up(v).includes(q)) || loose(b.puid).includes(loose(q));
   });
 }
 function boardItem(b) {
+  const board = isPuidLike(b.puid);
+  const qty = b.qty > 1 ? ` · 수량 ${b.qty}` : '';
   const sub = b.status === '분출'
-    ? `${esc(b.outType)} · ${esc(b.recipient)} · ${esc(b.team)} · ${esc(b.outDate)}`
-    : `LOT ${esc(b.lot)} · ${mfgOf(b.date)}`;
+    ? `${esc(b.outType)} · ${esc(b.recipient)} · ${esc(b.team)} · ${esc(b.outDate)}${qty}`
+    : [val(b.lot) && `LOT ${esc(b.lot)}`, board ? mfgOf(b.date) : esc(val(b.date)), !board && val(b.model) && esc(b.model)].filter(Boolean).join(' · ') + qty;
+  const main = board || (!blank(b.puid) && blank(b.codeno)) ? mono(val(b.puid)) : `${mono(val(b.codeno))}${!blank(b.puid) ? ` <span class="muted small">S/N ${esc(b.puid)}</span>` : ''}`;
   return `<li class="board ${b.status === '분출' ? 'is-out' : ''}" data-id="${esc(b.id)}">
-    <div><div class="b-id">${esc(b.id)}</div><div class="b-puid">${mono(b.puid)}</div></div>
+    <div><div class="b-id">${esc(b.id)}</div><div class="b-puid">${main || esc(val(b.model))}</div></div>
     <span class="badge ${esc(b.status)}">${esc(b.status)}</span>
     <div class="b-sub">${sub}</div></li>`;
 }
@@ -547,12 +669,15 @@ function closeModal() {
 }
 
 function detailHtml(b) {
-  const row = (k, v) => `<dt>${k}</dt><dd>${v || '<span class="muted">-</span>'}</dd>`;
+  const none = '<span class="muted">없음</span>';
+  const row = (k, v) => `<dt>${k}</dt><dd>${v || none}</dd>`;
   const chk = puidCheck(b);
+  const board = isPuidLike(b.puid);
+  const mfg = mfgOf(b.date);
   return `<dl class="kv">
-    ${row('품명(모델)', esc(b.model))}${row('제조사', esc(b.maker))}${row('CODENO', mono(b.codeno))}
-    ${row('PUID', mono(b.puid) + (chk ? ` <span class="${chk === 'OK' ? 'hint ok' : 'hint bad'}">검증 ${chk}</span>` : ''))}
-    ${row('LOT', mono(b.lot))}${row('DATE', mono(b.date) + (b.date ? ` <span class="muted">(${mfgOf(b.date)})</span>` : ''))}
+    ${row('품명(모델)', esc(val(b.model)))}${row('제조사', esc(val(b.maker)))}${row(board ? 'CODENO' : '제품 바코드', mono(val(b.codeno)))}
+    ${row(board ? 'PUID' : '시리얼', mono(val(b.puid)) + (chk ? ` <span class="${chk === 'OK' ? 'hint ok' : 'hint bad'}">검증 ${chk}</span>` : ''))}
+    ${row('LOT', mono(val(b.lot)))}${row(board ? 'DATE' : '제조일', mono(val(b.date)) + (mfg ? ` <span class="muted">(${mfg})</span>` : ''))}
     ${row('수량', b.qty)}${row('상태', `<span class="badge ${esc(b.status)}">${esc(b.status)}</span>`)}
     ${b.status === '분출' ? row('분출구분', esc(b.outType)) + row('수령자', esc(b.recipient)) + row('소속/팀', esc(b.team)) + row('분출일', esc(b.outDate)) : ''}
     ${row('비고', esc(b.note))}
@@ -582,8 +707,9 @@ function openOut(id) {
   if (b.status === '분출') return toast(`${b.id} 은(는) 이미 분출 상태입니다`, 'err');
   const recent = [...new Set(S.boards.filter((x) => x.team).map((x) => x.team))];
   openModal(`<h2>분출 — ${esc(b.id)}</h2>
-    <div class="mono-preview">${mono(b.puid)}</div>
+    <div class="mono-preview">${mono(val(b.puid) || val(b.codeno))} <span class="muted small">${esc(val(b.model))}</span></div>
     <form id="out-form" class="form" autocomplete="off">
+      ${b.qty > 1 ? `<label>분출 수량 (재고 ${b.qty}) <input name="n" type="number" min="1" max="${b.qty}" value="1" required></label>` : ''}
       <label>분출구분 <select name="outType" required>${OUT_TYPES.map((t) => `<option ${t === '타팀' ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <label>수령자 <span class="req">*</span><input name="recipient" required></label>
       <label>소속/팀 <input name="team" list="team-list"><datalist id="team-list">${recent.map((t) => `<option value="${esc(t)}">`).join('')}</datalist></label>
@@ -595,12 +721,24 @@ function openOut(id) {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     const fields = { status: '분출', outType: f.outType, recipient: f.recipient.trim(), team: f.team.trim(), outDate: f.outDate, note: f.note.trim() };
-    commit({ type: 'update', id: b.id, fields, expect: { status: '재고' }, action: '분출', detail: `${f.outType} / ${fields.recipient} / ${fields.team} / ${f.outDate}` });
+    const detail = `${f.outType} / ${fields.recipient} / ${fields.team} / ${f.outDate}`;
+    const n = Math.min(b.qty, Math.max(1, parseInt(f.n, 10) || b.qty));
+    if (n < b.qty) { // 일부만 분출: 남은 수량은 그대로 두고, 분출분을 새 관리번호로 나눈다
+      const nid = nextId(b.id.replace(/-\d+$/, ''));
+      const nb = { ...b, ...fields, id: nid, qty: n };
+      commit({ type: 'update', id: b.id, fields: { qty: b.qty - n }, expect: { status: '재고' }, action: '분출(분할)', detail: `수량 ${b.qty} → ${b.qty - n} (${n}개를 ${nid} 로 분출)` });
+      commit({ type: 'add', id: nid, board: nb, split: b.id, action: '분출', detail: `${b.id} 에서 ${n}개 분출 / ${detail}` });
+      closeModal();
+      toast(`${b.id} 에서 ${n}개 분출 → ${nid}`, 'ok', 4000);
+      afterScanAction();
+      return;
+    }
+    commit({ type: 'update', id: b.id, fields, expect: { status: '재고' }, action: '분출', detail: `${detail}${b.qty > 1 ? ` / 수량 ${b.qty}` : ''}` });
     closeModal();
     toast(`${b.id} 분출 처리됨`, 'ok');
     afterScanAction();
   });
-  setTimeout(() => $('#out-form [name=recipient]').focus(), 50);
+  setTimeout(() => $('#out-form [name=recipient]')?.focus(), 50);
 }
 
 function openReturn(id) {
@@ -685,16 +823,26 @@ function handleScan(raw, src = 'manual') {
       ${r.warn ? `<div class="hint bad">${esc(r.warn)}</div>` : ''}
       ${detailHtml(b)}${actionButtons(b)}${rawLine}</div>`;
   } else if (r.kind === 'lot') {
-    el.innerHTML = `<div class="result-card warn"><div class="result-title">LOT ${mono(r.token)} — ${r.boards.length}대</div>
-      <p class="muted small">LOT 바코드입니다. 보드를 고르거나 PUID 바코드를 스캔하세요.</p>
+    el.innerHTML = `<div class="result-card warn"><div class="result-title">LOT ${mono(r.token)} — ${r.boards.length}건</div>
+      <p class="muted small">LOT 바코드입니다. 항목을 고르거나 PUID·시리얼 바코드를 스캔하세요.</p>
       <ul class="board-list">${r.boards.map(boardItem).join('')}</ul>${rawLine}</div>`;
-  } else if (r.kind === 'codeno') {
-    el.innerHTML = `<div class="result-card warn"><div class="result-title">품목코드(CODENO) ${mono(r.token)}</div>
-      <p>모든 보드가 같은 코드입니다. 박스의 <b>PUID</b> 바코드나 관리번호 QR 라벨을 스캔하세요.</p>${rawLine}</div>`;
+  } else if (r.kind === 'product') {
+    const c = counts(r.boards);
+    const stock = r.boards.filter((b) => b.status === '재고');
+    const name = val(r.boards[0].model) || '제품';
+    const serialized = r.boards.some((b) => !blank(b.puid));
+    S.pendingRaw = raw;
+    el.innerHTML = `<div class="result-card warn"><div class="result-title"><span>${esc(name)} ${mono(r.token)}</span><span class="muted small">재고 ${c.stock} · 분출 ${c.out}</span></div>
+      <p class="muted small">${serialized ? '같은 제품 바코드가 여러 건입니다. PUID·시리얼 바코드나 관리번호 QR 을 스캔하면 한 건을 바로 찾습니다.' : '같은 제품 바코드의 항목입니다.'}</p>
+      <div class="btn-row">${stock.length ? `<button type="button" class="btn out wide" data-act="out" data-id="${esc(stock[0].id)}">분출 (${esc(stock[0].id)}${stock[0].qty > 1 ? ` · 재고 ${stock[0].qty}` : ''})</button>` : ''}
+        <button type="button" class="btn" data-act="new-general">같은 제품 추가 입고</button></div>
+      <ul class="board-list">${r.boards.map(boardItem).join('')}</ul>${rawLine}</div>`;
   } else {
+    S.pendingRaw = raw;
     el.innerHTML = `<div class="result-card err"><div class="result-title">대장에 없음</div>
       <p class="mono-preview">${mono(r.token)}</p>
-      ${r.newPuid ? `<div class="btn-row"><button type="button" class="btn primary wide" data-act="new" data-puid="${esc(r.newPuid)}">이 PUID 로 입고 등록</button></div>` : '<p class="muted small">PUID 형식(앞 2글자 + CN + LOT)이 아닙니다.</p>'}
+      <div class="btn-row">${r.newPuid ? `<button type="button" class="btn primary wide" data-act="new" data-puid="${esc(r.newPuid)}">이 PUID 로 보드 입고</button>` : ''}
+        <button type="button" class="btn ${r.newPuid ? '' : 'primary wide'}" data-act="new-general">일반 제품으로 입고</button></div>
       ${rawLine}</div>`;
   }
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -706,6 +854,7 @@ function afterScanAction() {
 /* 재고 실사 */
 function auditScan(r) {
   const el = $('#scan-result');
+  if (r.kind === 'product' && r.boards.length === 1) r = { ...r, kind: 'id' };
   if (r.kind === 'id' || r.kind === 'puid') {
     const b = r.boards[0];
     const dup = S.audit.includes(b.id);
@@ -715,7 +864,7 @@ function auditScan(r) {
       ${r.warn ? `<div class="hint bad">${esc(r.warn)}</div>` : ''}</div>`;
   } else {
     el.innerHTML = `<div class="result-card err"><div class="result-title">확인 불가</div><p class="mono-preview">${mono(r.token)}</p>
-      <p class="muted small">${r.kind === 'lot' ? 'LOT 바코드입니다. PUID 를 스캔하세요.' : '대장에 없는 코드입니다.'}</p></div>`;
+      <p class="muted small">${r.kind === 'lot' ? 'LOT 바코드입니다. PUID·시리얼을 스캔하세요.' : r.kind === 'product' ? `같은 제품이 ${r.boards.length}건이라 한 건을 정할 수 없습니다. 관리번호 QR 라벨이나 시리얼을 스캔하세요.` : '대장에 없는 코드입니다.'}</p></div>`;
   }
   renderAudit();
 }
@@ -731,17 +880,47 @@ function renderAudit() {
   $('#audit-found').innerHTML = found.map((b) => `<li><b>${esc(b.id)}</b><span class="badge ${esc(b.status)}">${esc(b.status)}</span></li>`).join('') || '<li class="muted">아직 없음</li>';
 }
 
-/* ------------------------------------------------------------------ 입고 */
+/* ------------------------------------------------------------------ 입고
+ * 유형 2가지: 보드(PUID 관리, 1대 1행) / 일반 바코드 제품(제품 바코드·시리얼·LOT 등 있는 것만, 수량 관리 가능)
+ */
+const addKind = () => (S.settings.addKind === 'general' ? 'general' : 'board');
+const ADD_LABELS = {
+  board: { puid: 'PUID', codeno: 'CODENO', date: 'DATE (YYWW)', scanHint: '박스 라벨의 PUID 바코드를 스캔하거나 라벨 사진을 찍으세요. LOT·DATE 는 PUID 에서 자동으로 채워집니다.' },
+  general: { puid: '시리얼 번호', codeno: '제품 바코드 (GTIN·EAN·품번)', date: '제조일 / DATE', scanHint: '제품 바코드나 라벨 사진을 스캔하면 읽힌 값만 채우고, 없는 칸은 비워 둡니다(설정에 따라 "없음"). 같은 바코드를 다시 입고하면 품명·제조사를 기억해 채웁니다.' },
+};
+function setAddKind(kind, reset = true) {
+  if (addKind() !== kind) { S.settings.addKind = kind; save(LS.settings, S.settings); }
+  const f = $('#add-form');
+  f.classList.toggle('general', kind === 'general');
+  $$('input[name=kind]', f).forEach((r) => { r.checked = r.value === kind; });
+  const L = ADD_LABELS[kind];
+  $('#lbl-puid').textContent = L.puid; $('#lbl-codeno').textContent = L.codeno; $('#lbl-date').textContent = L.date;
+  $('#add-kind-hint').textContent = L.scanHint;
+  f.puid.required = kind === 'board';
+  f.puid.placeholder = kind === 'board' ? '박스 PUID 바코드 스캔 또는 입력' : '없으면 비워 둠';
+  if (kind === 'board') f.date.setAttribute('maxlength', '4'); else f.date.removeAttribute('maxlength');
+  if (reset) {
+    for (const k of ['puid', 'lot', 'date', 'note', 'labelTime', 'labelNo', 'model', 'maker', 'codeno']) f[k].value = '';
+    f.qty.value = 1;
+    $('#add-photo-codes').innerHTML = '';
+    f.id.value = nextId();
+    prepAddForm(true);
+  }
+}
 function prepAddForm(keepPuid) {
   const f = $('#add-form');
   if (!keepPuid) f.puid.value = '';
-  if (!f.id.value || byId(f.id.value)) f.id.value = nextId();
-  f.model.value = f.model.value || S.settings.dModel;
-  f.maker.value = f.maker.value || S.settings.dMaker;
-  f.codeno.value = f.codeno.value || S.settings.dCodeno;
+  const pre = up(addKind() === 'general' ? S.settings.gPrefix : S.settings.dPrefix);
+  if (!f.id.value || byId(f.id.value) || !up(f.id.value).startsWith(pre + '-')) f.id.value = nextId();
+  if (addKind() === 'board') {
+    f.model.value = f.model.value || S.settings.dModel;
+    f.maker.value = f.maker.value || S.settings.dMaker;
+    f.codeno.value = f.codeno.value || S.settings.dCodeno;
+  }
   updateAddCheck();
 }
 function fillAddFromScan(raw) {
+  if (addKind() === 'general') return fillGeneral(raw);
   const p = parseScan(raw);
   const f = $('#add-form');
   const puid = p.tokens.find((t) => derive(t));
@@ -749,6 +928,8 @@ function fillAddFromScan(raw) {
   const kind = codeKind(raw);
   if (puid) {
     f.puid.value = puid;
+    if (p.fields.model) f.model.value = p.fields.model;
+    if (p.fields.codeno) f.codeno.value = p.fields.codeno;
   } else if (lot) {
     fillLotOnly(lot, p.fields.date);
     toast('LOT 바코드를 읽었습니다. PUID 바코드를 스캔하거나 PUID 앞 2글자를 입력하세요.', '', 5000);
@@ -759,10 +940,34 @@ function fillAddFromScan(raw) {
   } else if (kind === 'CODENO') {
     toast('품목코드(CODENO) 바코드입니다. 박스의 PUID 바코드를 스캔하세요.', 'err', 5000);
     return;
+  } else if (kind === '제품 바코드' || kind === '묶음(2D)' || kind === '시리얼' || kind === '기타') {
+    setAddKind('general');
+    fillGeneral(raw);
+    toast('PUID 가 없는 바코드라 "일반 제품" 입고로 바꿨습니다', '', 5000);
+    return;
   } else {
-    f.puid.value = p.tokens[0] || '';
+    toast(`${kind} 바코드입니다. 박스의 PUID 바코드를 스캔하세요.`, 'err', 4000);
+    return;
   }
   onPuidChange();
+}
+/** 일반 제품: 스캔에서 읽힌 값만 채우고 나머지는 비운다 */
+function fillGeneral(raw) {
+  const f = $('#add-form');
+  const v = scanFields(raw);
+  const known = productInfo(v.codeno);
+  f.codeno.value = v.codeno;
+  f.puid.value = v.puid;
+  f.lot.value = v.lot;
+  f.date.value = v.date;
+  f.qty.value = v.qty || 1;
+  f.model.value = v.model || (known && known.model) || '';
+  f.maker.value = (known && known.maker) || '';
+  f.note.value = v.expiry ? `유효기한 ${v.expiry}` : '';
+  const got = [['제품 바코드', v.codeno], ['품명', v.model], ['시리얼', v.puid], ['LOT', v.lot], ['제조일', v.date], ['수량', v.qty]];
+  S.addScanInfo = { got: got.filter((g) => g[1]).map((g) => g[0]), miss: got.filter((g) => !g[1]).map((g) => g[0]), known: !!known };
+  updateAddCheck();
+  if (!f.model.value) setTimeout(() => f.model.focus(), 50);
 }
 /** PUID 는 못 읽고 LOT 만 읽었을 때: PUID = 앞 2글자 + CN + LOT 이므로 뒤쪽을 채워 두고 앞 2글자만 입력받는다 */
 function fillLotOnly(lot, date) {
@@ -785,11 +990,17 @@ const isRegisteredPuid = (p) => S.boards.find((b) => b.puid && loose(b.puid) ===
 async function photoToAdd(file) {
   const f = $('#add-form');
   const box = $('#add-photo-codes');
+  const general = addKind() === 'general';
   box.innerHTML = '<p class="muted small" id="photo-step">사진 인식 중…</p>';
   let codes = [];
-  try { codes = await readPhotoCodes(file, (s) => { const el = $('#photo-step'); if (el) el.textContent = s; }); } catch { /* 아래에서 안내 */ }
+  try { codes = await readPhotoCodes(file, (s) => { const el = $('#photo-step'); if (el) el.textContent = s; }, general ? (t) => t.length > 0 : hasKeyCode); } catch { /* 아래에서 안내 */ }
   box.innerHTML = codesListHtml(codes);
   if (!codes.length) return toast(PHOTO_FAIL, 'err', 7000);
+  if (general) {
+    fillGeneral(codes.map((c) => c.text));
+    toast(`바코드 ${codes.length}개 인식 — 읽힌 값만 채웠습니다`, 'ok', 4000);
+    return;
+  }
   const cands = puidCandidates(codes);
   const fresh = cands.filter((p) => !isRegisteredPuid(p));
   if (fresh.length > 1) {
@@ -810,7 +1021,14 @@ async function photoToAdd(file) {
     toast('PUID 바코드는 못 읽고 LOT 만 읽었습니다. PUID 앞 2글자를 입력하거나 PUID 바코드가 크게 나오게 다시 찍어 보세요.', 'err', 7000);
     return;
   }
-  toast(`PUID 바코드를 찾지 못했습니다 (읽은 것: ${codes.map((c) => codeKind(c.text)).join(', ')}). PUID 바코드가 크게 나오게 다시 찍어 보세요.`, 'err', 7000);
+  const kinds = codes.map((c) => codeKind(c.text));
+  if (kinds.some((k) => ['제품 바코드', '묶음(2D)', '시리얼', '기타'].includes(k))) {
+    setAddKind('general');
+    $('#add-photo-codes').innerHTML = codesListHtml(codes);
+    fillGeneral(codes.map((c) => c.text));
+    return toast('PUID 가 없어 "일반 제품" 입고로 바꿨습니다. 읽힌 값만 채웠습니다.', '', 6000);
+  }
+  toast(`PUID 바코드를 찾지 못했습니다 (읽은 것: ${kinds.join(', ')}). PUID 바코드가 크게 나오게 다시 찍어 보세요.`, 'err', 7000);
 }
 /** 사진 → 스캔 화면 (조회·실사) */
 async function photoToScan(file) {
@@ -826,9 +1044,7 @@ async function photoToScan(file) {
     for (const x of boardHits) if (!seen.has(x.r.boards[0].id)) { seen.add(x.r.boards[0].id); auditScan(x.r); }
     if (seen.size > 1) toast(`사진에서 보드 ${seen.size}대 확인: ${[...seen].join(', ')}`, 'ok', 5000);
   } else {
-    const score = (r) => ({ id: 0, puid: 0, lot: 3, codeno: 4 }[r.kind] ?? (r.newPuid ? 1 : 5));
-    rs.sort((a, b) => score(a.r) - score(b.r));
-    handleScan(rs[0].c.text, 'photo');
+    handleScan(codes.map((c) => c.text), 'photo'); // 사진 속 바코드를 모두 합쳐 조회 (관리번호 > PUID·시리얼 > 제품 > LOT)
   }
   el.insertAdjacentHTML('beforeend', codesListHtml(codes));
 }
@@ -841,13 +1057,28 @@ function onPuidChange() {
 }
 function updateAddCheck() {
   const f = $('#add-form');
-  $('#add-puid-preview').innerHTML = mono(up(f.puid.value));
   const hint = $('#add-check');
+  hint.classList.remove('ok', 'bad');
+  if (addKind() === 'general') {
+    $('#add-puid-preview').innerHTML = '';
+    const sn = up(f.puid.value);
+    const dup = !blank(sn) && S.boards.find((b) => !blank(b.puid) && b.puid === sn);
+    if (dup) { hint.textContent = `이미 등록된 시리얼입니다 → ${dup.id}`; hint.classList.add('bad'); return; }
+    const info = S.addScanInfo;
+    const mark = S.settings.blankMark === '없음' ? '"없음"' : '공란';
+    if (info) {
+      const miss = info.miss.filter((k) => !(info.known && k === '품명'));
+      hint.innerHTML = `바코드에서 읽음: <b>${esc(info.got.join(', ') || '없음')}</b>` + (miss.length ? ` · 못 읽음: ${esc(miss.join(', '))} → ${mark}으로 저장` : '') +
+        (info.known ? '<br>품명·제조사는 전에 등록한 같은 바코드 제품에서 채웠습니다.' : f.codeno.value ? '<br>처음 보는 제품입니다. 품명·제조사를 한 번 입력하면 다음부터 같은 바코드에 자동으로 채웁니다.' : '');
+      hint.classList.add(f.model.value || f.codeno.value ? 'ok' : 'bad');
+    } else hint.textContent = '';
+    return;
+  }
+  $('#add-puid-preview').innerHTML = mono(up(f.puid.value));
   const puid = up(f.puid.value), lot = up(f.lot.value);
-  hint.className = 'hint';
   if (!puid) { hint.textContent = ''; return; }
   if (lot && puid === 'CN' + lot) { hint.textContent = 'PUID 앞 2글자만 입력하세요 (PUID = 앞 2글자 + CN + LOT). 박스 라벨의 PUID 글자를 보고 0/O, 1/I 를 구분해 입력합니다.'; hint.classList.add('bad'); return; }
-  const dupP = S.boards.find((b) => b.puid === puid || loose(b.puid) === loose(puid));
+  const dupP = S.boards.find((b) => !blank(b.puid) && (b.puid === puid || loose(b.puid) === loose(puid)));
   if (dupP) { hint.textContent = `이미 등록된 PUID 입니다 → ${dupP.id}${dupP.puid !== puid ? ' (0/O·1/I 차이만 있음)' : ''}`; hint.classList.add('bad'); return; }
   if (puid.slice(2) === 'CN' + lot) {
     hint.textContent = `PUID 검증 OK · ${mfgOf(f.date.value)} · 앞 2글자 ${puid.slice(0, 2)} 의 숫자/영문 구분을 확인하세요 (파란색 = 숫자)`;
@@ -860,28 +1091,41 @@ function updateAddCheck() {
 function submitAdd(e) {
   e.preventDefault();
   const f = e.target;
+  const general = addKind() === 'general';
   const b = normBoard(Object.fromEntries(new FormData(f)));
-  if (!b.id || !b.puid) return toast('관리번호와 PUID 는 필수입니다', 'err');
+  if (!b.id) return toast('관리번호는 필수입니다', 'err');
   if (byId(b.id)) return toast(`관리번호 ${b.id} 이(가) 이미 있습니다`, 'err');
-  const dup = S.boards.find((x) => loose(x.puid) === loose(b.puid));
-  if (dup) return toast(`이미 등록된 PUID 입니다 (${dup.id})`, 'err');
-  if (puidCheck(b) !== 'OK' && !confirm('PUID 뒤쪽이 CN + LOT 와 다릅니다. 그래도 저장할까요?')) return;
+  if (general) {
+    if (blank(b.codeno) && blank(b.model) && blank(b.puid)) return toast('제품 바코드·품명·시리얼 중 하나는 있어야 합니다', 'err');
+    const dup = !blank(b.puid) && S.boards.find((x) => !blank(x.puid) && x.puid === b.puid);
+    if (dup) return toast(`이미 등록된 시리얼입니다 (${dup.id})`, 'err');
+  } else {
+    if (!b.puid) return toast('PUID 는 필수입니다', 'err');
+    const dup = S.boards.find((x) => !blank(x.puid) && loose(x.puid) === loose(b.puid));
+    if (dup) return toast(`이미 등록된 PUID 입니다 (${dup.id})`, 'err');
+    if (puidCheck(b) !== 'OK' && !confirm('PUID 뒤쪽이 CN + LOT 와 다릅니다. 그래도 저장할까요?')) return;
+  }
+  if (S.settings.blankMark === '없음') for (const k of BLANK_FIELDS) if (!b[k]) b[k] = '없음';
   b.status = '재고';
-  commit({ type: 'add', id: b.id, board: b, action: '입고', detail: `PUID ${b.puid} / LOT ${b.lot} / ${b.model}` });
+  const detail = general
+    ? [val(b.model) || '(품명 없음)', !blank(b.codeno) && `바코드 ${b.codeno}`, !blank(b.puid) && `시리얼 ${b.puid}`, !blank(b.lot) && `LOT ${b.lot}`, `수량 ${b.qty}`].filter(Boolean).join(' / ')
+    : `PUID ${b.puid} / LOT ${b.lot} / ${b.model}`;
+  commit({ type: 'add', id: b.id, board: b, action: '입고', detail });
   toast(`${b.id} 입고 등록됨`, 'ok');
   const cont = f.cont.checked;
   for (const k of ['puid', 'lot', 'date', 'note', 'labelTime', 'labelNo']) f[k].value = '';
+  if (general) { for (const k of ['codeno', 'model', 'maker']) f[k].value = ''; S.addScanInfo = null; }
   f.qty.value = 1;
   f.id.value = nextId();
   $('#add-photo-codes').innerHTML = '';
   updateAddCheck();
-  if (cont) f.puid.focus(); else show('list');
+  if (cont) (general ? f.codeno : f.puid).focus(); else show('list');
 }
 
 /* 모달 카메라 (입고 PUID 스캔): PUID 가 아닌 바코드(CODENO·LOT 등)는 알려 주기만 하고 계속 찾는다 */
 function openCamModal(onCode, accept = () => true, onOther = () => {}) {
   openModal(`<h2>바코드 스캔</h2><div class="cam-box on"><div id="cam-modal" class="cam"></div></div>
-    <p class="small" id="cam-modal-msg">박스의 <b>PUID</b> 바코드를 화면 가운데에 맞추세요.</p>
+    <p class="small" id="cam-modal-msg">${addKind() === 'general' ? '제품 바코드를 화면 가운데에 맞추세요.' : '박스의 <b>PUID</b> 바코드를 화면 가운데에 맞추세요.'}</p>
     <p class="muted small">작은 바코드가 안 잡히면 <b>사진 찍어 인식</b>이 더 잘 됩니다 (폰 카메라 앱의 고해상도·초점 사용).</p>
     <div class="btn-row"><label class="btn primary" for="file-add">사진 찍어 인식</label><button type="button" class="btn" data-close="1">닫기</button></div>`);
   Cam.start('cam-modal', (t) => {
@@ -896,17 +1140,20 @@ function openCamModal(onCode, accept = () => true, onOther = () => {}) {
 function fillSettings() {
   const f = $('#settings-form');
   const s = S.settings;
-  for (const k of ['user', 'url', 'token', 'dModel', 'dMaker', 'dCodeno', 'dPrefix']) f[k].value = s[k] || '';
+  for (const k of ['user', 'url', 'token', 'dModel', 'dMaker', 'dCodeno', 'dPrefix', 'gPrefix']) f[k].value = s[k] || '';
   $$('input[name=mode]', f).forEach((r) => { r.checked = r.value === s.mode; });
+  $$('input[name=blankMark]', f).forEach((r) => { r.checked = r.value === (s.blankMark || ''); });
   $('#sheet-fields').hidden = s.mode !== 'sheet';
   $('#share-qr').hidden = true;
-  $('#app-info').textContent = `버전 ${APP_VERSION} · 보드 ${S.boards.length}대 · 대기 작업 ${S.outbox.length}건` + (S.lastSync ? ` · 마지막 동기화 ${S.lastSync}` : '');
+  $('#app-info').textContent = `버전 ${APP_VERSION} · 항목 ${S.boards.length}건 · 대기 작업 ${S.outbox.length}건` + (S.lastSync ? ` · 마지막 동기화 ${S.lastSync}` : '');
 }
 function readSettingsForm() {
   const f = $('#settings-form');
   const o = Object.fromEntries(new FormData(f));
   o.url = (o.url || '').trim(); o.token = (o.token || '').trim();
   o.dPrefix = up(o.dPrefix) || 'BRD';
+  o.gPrefix = up(o.gPrefix) || 'ITEM';
+  o.blankMark = o.blankMark === '없음' ? '없음' : '';
   return Object.assign({}, S.settings, o);
 }
 async function saveSettings(e) {
@@ -992,11 +1239,11 @@ function csvToBoards(text) {
   const head = rows[0].map((h) => h.trim().split('\n')[0]);
   const idx = CSV_HEADERS.map((h) => head.findIndex((x) => x === h || x.startsWith(h)));
   if (idx[0] < 0) throw new Error('"관리번호" 열이 없습니다');
-  const extra = { model: head.indexOf('품명(모델)'), maker: head.indexOf('제조사'), codeno: head.indexOf('CODENO') };
+  const st = S.settings;
+  const def = { model: st.dModel, maker: st.dMaker, codeno: st.dCodeno }; // 옛 ledger.csv(품목 열 없음)는 보드 기본값
   return rows.slice(1).map((r) => {
     const o = {};
-    CSV_KEYS.forEach((k, i) => { o[k] = idx[i] >= 0 ? (r[idx[i]] || '').trim() : ''; });
-    for (const [k, i] of Object.entries(extra)) if (i >= 0) o[k] = (r[i] || '').trim();
+    CSV_KEYS.forEach((k, i) => { o[k] = idx[i] >= 0 ? (r[idx[i]] || '').trim() : (def[k] || ''); });
     if (o.outDate) o.outDate = o.outDate.replace(/\s/g, '').replace(/[./]/g, '-').replace(/-$/, '');
     return normBoard(o);
   }).filter((b) => b.id);
@@ -1049,8 +1296,9 @@ function printLabels(list) {
     qr.addData(b.id);
     qr.make();
     return `<div class="label">${qr.createSvgTag({ cellSize: 2, margin: 0, scalable: true })}
-      <div><div class="l-id">${esc(b.id)}</div><div class="l-sub">${esc(b.model)}</div>
-      <div class="l-sub">PUID ${mono(b.puid)}</div><div class="l-sub">LOT ${mono(b.lot)}</div></div></div>`;
+      <div><div class="l-id">${esc(b.id)}</div><div class="l-sub">${esc(val(b.model))}</div>
+      ${val(b.puid) ? `<div class="l-sub">${isPuidLike(b.puid) ? 'PUID' : 'S/N'} ${mono(b.puid)}</div>` : val(b.codeno) ? `<div class="l-sub">${mono(b.codeno)}</div>` : ''}
+      ${val(b.lot) ? `<div class="l-sub">LOT ${mono(b.lot)}</div>` : ''}${b.qty > 1 ? `<div class="l-sub">수량 ${b.qty}</div>` : ''}</div></div>`;
   }).join('');
   setTimeout(() => window.print(), 100);
 }
@@ -1085,7 +1333,8 @@ function bind() {
       else if (a.dataset.act === 'edit') openEdit(id);
       else if (a.dataset.act === 'label') { const b = byId(id); if (b) printLabels([b]); }
       else if (a.dataset.act === 'pick-puid') { closeModal(); $('#add-form').puid.value = a.dataset.puid; onPuidChange(); toast(`PUID ${a.dataset.puid} 선택`, 'ok'); }
-      else if (a.dataset.act === 'new') { show('add'); $('#add-form').puid.value = a.dataset.puid; onPuidChange(); }
+      else if (a.dataset.act === 'new-general') { closeModal(); show('add'); setAddKind('general'); if (S.pendingRaw) fillGeneral(S.pendingRaw); }
+      else if (a.dataset.act === 'new') { show('add'); setAddKind('board'); $('#add-form').puid.value = a.dataset.puid; onPuidChange(); }
       return;
     }
     const li = e.target.closest('.board[data-id]');
@@ -1141,8 +1390,17 @@ function bind() {
   // 입고
   const af = $('#add-form');
   af.addEventListener('submit', submitAdd);
-  af.puid.addEventListener('input', onPuidChange);
+  af.puid.addEventListener('input', () => { if (addKind() === 'board') onPuidChange(); });
+  $$('input[name=kind]', af).forEach((r) => r.addEventListener('change', () => { if (r.checked) setAddKind(r.value); }));
+  af.codeno.addEventListener('keydown', (e) => { // 일반 제품: 바코드 칸에 리더기로 쏘면 해석해서 나눠 채움
+    if (addKind() !== 'general' || e.key !== 'Enter' || !af.codeno.value) return;
+    e.preventDefault();
+    fillGeneral(af.codeno.value);
+  });
+  af.model.addEventListener('input', () => { if (addKind() === 'general') updateAddCheck(); });
+  af.puid.addEventListener('input', () => { if (addKind() === 'general') updateAddCheck(); });
   af.puid.addEventListener('keydown', (e) => {
+    if (addKind() === 'general') return;
     if (e.key === 'Enter' || e.key === 'Tab') {
       if (!af.puid.value) return;
       e.preventDefault();
@@ -1154,7 +1412,7 @@ function bind() {
   af.date.addEventListener('input', updateAddCheck);
   $$('[data-cam-for]').forEach((b) => b.addEventListener('click', () => openCamModal(
     (t) => fillAddFromScan(t),
-    (t) => puidCandidates([{ text: t }]).length > 0,
+    (t) => addKind() === 'general' || puidCandidates([{ text: t }]).length > 0,
     (t) => { const p = parseScan(t); const lot = p.fields.lot || p.tokens.find(isLotLike); if (lot) fillLotOnly(lot, p.fields.date); },
   )));
   $('#file-add').addEventListener('change', (e) => {
@@ -1192,6 +1450,7 @@ function bind() {
 function init() {
   checkSetupLink();
   bind();
+  setAddKind(addKind());
   renderAll();
   show('dash');
   if (isSheet()) { pull(); setInterval(() => document.visibilityState === 'visible' && pull(), 60000); }

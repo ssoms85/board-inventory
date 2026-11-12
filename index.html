@@ -36,6 +36,11 @@
     <h2>분출구분별</h2>
     <table class="tbl" id="tbl-outtype"><thead><tr><th>분출구분</th><th>수량</th></tr></thead><tbody></tbody></table>
 
+    <h2>품목별</h2>
+    <div class="tbl-wrap">
+      <table class="tbl" id="tbl-item"><thead><tr><th>품목</th><th>입고</th><th>재고</th><th>분출</th></tr></thead><tbody></tbody></table>
+    </div>
+
     <h2>LOT별</h2>
     <div class="tbl-wrap">
       <table class="tbl" id="tbl-lot"><thead><tr><th>LOT</th><th>입고</th><th>재고</th><th>분출</th><th>제조시기</th></tr></thead><tbody></tbody></table>
@@ -110,43 +115,43 @@
 
   <!-- 입고 -->
   <section id="view-add" class="view" hidden>
-    <form id="add-form" class="form" autocomplete="off">
-      <h2>입고 등록</h2>
-      <label>PUID <span class="req">*</span>
-        <div class="input-btn">
-          <input name="puid" data-scan="1" required autocapitalize="characters" spellcheck="false"
-                 placeholder="박스 PUID 바코드 스캔 또는 입력" enterkeyhint="next">
-          <button type="button" class="btn icon" data-cam-for="puid" title="카메라로 스캔">📷</button>
-          <label class="btn icon" for="file-add" title="사진 찍어 인식 (라벨의 바코드를 모두 읽고 PUID 를 골라냄)">🖼</label>
-        </div>
-      </label>
-      <input type="file" id="file-add" accept="image/*" hidden>
-      <div class="mono-preview" id="add-puid-preview"></div>
-      <div id="add-photo-codes"></div>
-      <div class="grid2">
-        <label>LOT <input name="lot" autocapitalize="characters" spellcheck="false"></label>
-        <label>DATE (YYWW) <input name="date" inputmode="numeric" maxlength="4"></label>
+    <form id="add-form" class="form add-form" autocomplete="off">
+      <h2 class="r-title">입고 등록</h2>
+      <div class="seg r-kind">
+        <label class="seg-btn"><input type="radio" name="kind" value="board" checked> 보드 (PUID)</label>
+        <label class="seg-btn"><input type="radio" name="kind" value="general"> 일반 바코드 제품</label>
       </div>
-      <div class="hint" id="add-check"></div>
-      <div class="grid2">
+      <div class="btn-row r-scan">
+        <button type="button" class="btn" data-cam-for="add">📷 카메라 스캔</button>
+        <label class="btn" for="file-add">🖼 사진으로 인식</label>
+        <input type="file" id="file-add" accept="image/*" hidden>
+      </div>
+      <p class="muted small r-khint" id="add-kind-hint"></p>
+      <div id="add-photo-codes" class="r-photo"></div>
+      <label class="r-codeno"><span id="lbl-codeno">CODENO</span>
+        <input name="codeno" data-scan="1" autocapitalize="characters" spellcheck="false" enterkeyhint="next"></label>
+      <label class="r-model">품명(모델) <input name="model"></label>
+      <label class="r-maker">제조사 <input name="maker"></label>
+      <label class="r-puid"><span id="lbl-puid">PUID</span> <span class="req b-only">*</span>
+        <input name="puid" data-scan="1" required autocapitalize="characters" spellcheck="false"
+               placeholder="박스 PUID 바코드 스캔 또는 입력" enterkeyhint="next"></label>
+      <div class="mono-preview r-preview b-only" id="add-puid-preview"></div>
+      <div class="grid2 r-lotdate">
+        <label>LOT <input name="lot" autocapitalize="characters" spellcheck="false"></label>
+        <label><span id="lbl-date">DATE (YYWW)</span> <input name="date" maxlength="4"></label>
+      </div>
+      <div class="hint r-hint" id="add-check"></div>
+      <div class="grid2 r-idqty">
         <label>관리번호 <span class="req">*</span> <input name="id" required autocapitalize="characters"></label>
         <label>수량 <input name="qty" type="number" min="1" value="1"></label>
       </div>
-      <details class="more">
-        <summary>품목 정보 (기본값: 설정)</summary>
-        <label>품명(모델) <input name="model"></label>
-        <div class="grid2">
-          <label>제조사 <input name="maker"></label>
-          <label>CODENO <input name="codeno" inputmode="numeric"></label>
-        </div>
-        <div class="grid2">
-          <label>물류라벨 일시 <input name="labelTime"></label>
-          <label>물류라벨 번호 <input name="labelNo"></label>
-        </div>
-      </details>
-      <label>비고 <input name="note" placeholder="예: 숫자 2 + 영문 W (확대 확인)"></label>
-      <label class="check"><input type="checkbox" name="cont" checked> 연속 입고 (저장 후 다음 번호로)</label>
-      <div class="btn-row">
+      <label class="r-note">비고 <input name="note" placeholder="예: 숫자 2 + 영문 W (확대 확인)"></label>
+      <div class="grid2 r-labels">
+        <label>물류라벨 일시 <input name="labelTime"></label>
+        <label>물류라벨 번호 <input name="labelNo"></label>
+      </div>
+      <label class="check r-cont"><input type="checkbox" name="cont" checked> 연속 입고 (저장 후 다음 번호로)</label>
+      <div class="btn-row r-submit">
         <button class="btn primary wide" type="submit">입고 저장</button>
       </div>
     </form>
@@ -173,13 +178,21 @@
         <div id="share-qr" class="share-qr" hidden></div>
       </div>
 
-      <h2>기본 품목</h2>
+      <h2>보드 기본 품목</h2>
       <label>품명(모델) <input name="dModel"></label>
       <div class="grid2">
         <label>제조사 <input name="dMaker"></label>
         <label>CODENO <input name="dCodeno" inputmode="numeric"></label>
       </div>
-      <label>관리번호 접두어 <input name="dPrefix" autocapitalize="characters"></label>
+      <label>보드 관리번호 접두어 <input name="dPrefix" autocapitalize="characters"></label>
+
+      <h2>일반 바코드 제품</h2>
+      <label>관리번호 접두어 <input name="gPrefix" autocapitalize="characters" placeholder="ITEM"></label>
+      <p class="muted small">바코드·사진에서 읽지 못한 칸(품명·제조사·바코드·시리얼·LOT)을 저장할 때</p>
+      <div class="seg">
+        <label class="seg-btn"><input type="radio" name="blankMark" value=""> 공란으로 둠</label>
+        <label class="seg-btn"><input type="radio" name="blankMark" value="없음"> "없음" 으로 채움</label>
+      </div>
 
       <div class="btn-row">
         <button class="btn primary wide" type="submit">설정 저장</button>

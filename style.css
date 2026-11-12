@@ -249,3 +249,16 @@ details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; pa
 .tag { display: inline-block; flex: none; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--line); color: var(--text); }
 .pick-list { display: grid; gap: 8px; margin: 10px 0; }
 .pick-list .btn { font-size: 18px; justify-content: center; }
+
+/* 입고: 유형별 칸 순서 (보드 = 문서 순서, 일반 제품 = 바코드·품명 먼저) */
+.add-form { display: flex; flex-direction: column; }
+.add-form > * { order: 50; }
+.add-form .r-title { order: 0; } .add-form .r-kind { order: 1; } .add-form .r-scan { order: 2; } .add-form .r-khint { order: 3; } .add-form .r-photo { order: 4; }
+.add-form .r-puid { order: 10; } .add-form .r-preview { order: 11; } .add-form .r-lotdate { order: 12; } .add-form .r-hint { order: 13; }
+.add-form .r-idqty { order: 14; } .add-form .r-model { order: 15; } .add-form .r-maker { order: 16; } .add-form .r-codeno { order: 17; }
+.add-form .r-note { order: 18; } .add-form .r-labels { order: 19; } .add-form .r-cont { order: 20; } .add-form .r-submit { order: 21; }
+.add-form.general .r-codeno { order: 10; } .add-form.general .r-model { order: 11; } .add-form.general .r-maker { order: 12; }
+.add-form.general .r-puid { order: 13; } .add-form.general .r-lotdate { order: 14; } .add-form.general .r-hint { order: 15; }
+.add-form.general .r-idqty { order: 16; } .add-form.general .r-note { order: 17; } .add-form.general .r-labels { order: 19; }
+.add-form.general .b-only { display: none; }
+.add-form .r-scan { margin-top: 4px; }
