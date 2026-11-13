@@ -1,17 +1,39 @@
 {
+  "id": "./board-inventory",
   "name": "보드 재고관리",
   "short_name": "보드재고",
-  "description": "개발보드 입고·분출·반납·실사 관리 (카메라/바코드리더기 스캔)",
+  "description": "개발보드·일반 바코드 제품 입고·분출·반납·실사 관리 (카메라/사진/바코드리더기 스캔)",
   "lang": "ko",
+  "dir": "ltr",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#f4f6f9",
   "theme_color": "#1F4E78",
+  "categories": [
+    "business",
+    "productivity",
+    "utilities"
+  ],
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
