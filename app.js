@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const OUT_TYPES = ['팀내', '타팀', '외부', '증정'];
 const STATUSES = ['재고', '분출'];
 // 앞 13열은 ledger.csv(build_inventory.py 입력)와 같은 순서, 뒤 3열은 일반 제품용 품목 정보
@@ -1389,15 +1389,22 @@ function checkSetupLink() {
 }
 
 /* ------------------------------------------------------------------ CSV */
+// 구분자: 첫 줄에 가장 많이 나오는 것 (엑셀 '유니코드 텍스트'는 탭, 유럽식 설정은 세미콜론)
+function csvSep(text) {
+  const first = text.split(/[\r\n]/, 1)[0];
+  const n = (ch) => first.split(ch).length - 1;
+  return n('\t') > n(',') ? '\t' : n(';') > n(',') ? ';' : ',';
+}
 function parseCsv(text) {
   text = text.replace(/^﻿/, '');
+  const sep = csvSep(text);
   const rows = []; let row = [], cell = '', q = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (q) {
       if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c;
     } else if (c === '"') q = true;
-    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === sep) { row.push(cell); cell = ''; }
     else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
     else cell += c;
   }
@@ -1409,7 +1416,7 @@ function csvToBoards(text) {
   if (!rows.length) return [];
   const head = rows[0].map((h) => h.trim().split('\n')[0]);
   const idx = CSV_HEADERS.map((h) => head.findIndex((x) => x === h || x.startsWith(h)));
-  if (idx[0] < 0) throw new Error('"관리번호" 열이 없습니다');
+  if (idx[0] < 0) throw new Error(`"관리번호" 열이 없습니다 (첫 줄: ${head.slice(0, 4).join(', ').slice(0, 60) || '비어 있음'})`);
   const st = S.settings;
   const def = { model: st.dModel, maker: st.dMaker, codeno: st.dCodeno }; // 옛 ledger.csv(품목 열 없음)는 보드 기본값
   return rows.slice(1).map((r) => {
@@ -1432,16 +1439,48 @@ function download(name, text, type = 'text/csv;charset=utf-8') {
   a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
+const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// 휴대폰(특히 안드로이드 앱·아이폰 홈 화면 앱)은 다운로드가 막히거나 어디 저장됐는지 찾기 어려워서
+// '기기에 저장'과 '공유(카카오톡·드라이브·메일)' 중 고르게 한다. PC 는 바로 다운로드.
 function exportCsv(list = S.boards) {
-  download(`ledger_${today()}.csv`, boardsToCsv(list));
+  if (!list.length) return toast('내보낼 항목이 없습니다', 'err');
+  const name = `ledger_${today()}.csv`;
+  const text = boardsToCsv(list);
+  let file = null;
+  try { file = new File([text], name, { type: 'text/csv' }); } catch { /* 옛 브라우저 */ }
+  if (!IS_MOBILE || !file || !navigator.canShare?.({ files: [file] })) {
+    download(name, text);
+    return toast(`${list.length}행 내보냄 (다운로드 폴더)`, 'ok');
+  }
+  openModal(`<h3>CSV 내보내기</h3>
+    <p class="muted">${esc(name)} · ${list.length}행</p>
+    <div class="pick-list">
+      <button type="button" class="btn primary wide" id="csv-share">공유 (카카오톡 · 드라이브 · 메일)</button>
+      <button type="button" class="btn wide" id="csv-save">기기에 저장 (다운로드 폴더)</button>
+    </div>
+    <p class="muted">저장한 파일은 '내 파일 → 다운로드'에 있습니다. 저장이 안 되면 공유로 보내세요.</p>`);
+  $('#csv-share').addEventListener('click', async () => {
+    try { await navigator.share({ files: [file], title: name }); closeModal(); toast('공유했습니다', 'ok'); }
+    catch (e) { if (e.name !== 'AbortError') toast('공유 실패: ' + e.message, 'err'); }
+  });
+  $('#csv-save').addEventListener('click', () => { download(name, text); closeModal(); toast('다운로드 폴더에 저장했습니다', 'ok'); });
+}
+// 인코딩 자동 판별: UTF-8(BOM 유무) → 실패하면 엑셀 기본 저장 형식인 CP949(EUC-KR). UTF-16 BOM 도 처리.
+async function readCsvFile(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (buf[0] === 0x50 && buf[1] === 0x4b) throw new Error('엑셀 파일(xlsx)입니다. 엑셀에서 "다른 이름으로 저장 → CSV" 로 저장한 파일을 고르세요');
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf);
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf);
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { return new TextDecoder('euc-kr').decode(buf); }
 }
 async function importCsv(file) {
   let list;
-  try { list = csvToBoards(await file.text()); } catch (e) { return toast('CSV 오류: ' + e.message, 'err'); }
+  try { list = csvToBoards(await readCsvFile(file)); } catch (e) { return toast('CSV 오류: ' + e.message, 'err', 6000); }
   if (!list.length) return toast('가져올 행이 없습니다', 'err');
   const fresh = list.filter((b) => !byId(b.id));
   if (isSheet()) {
-    if (!fresh.length) return toast('시트에 없는 새 보드가 없습니다');
+    if (!fresh.length) return toast(`CSV ${list.length}행이 모두 이미 대장에 있습니다 (시트 연동 중에는 새 관리번호만 추가)`, '', 6000);
     if (!confirm(`CSV ${list.length}행 중 대장에 없는 ${fresh.length}대를 Google 시트에 입고로 추가할까요?\n(이미 있는 관리번호는 건너뜁니다)`)) return;
     for (const b of fresh) commit({ type: 'add', id: b.id, board: b, action: '입고', detail: `CSV 가져오기 / PUID ${b.puid}` });
     return toast(`${fresh.length}대 추가 요청`, 'ok');

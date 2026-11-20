@@ -204,7 +204,8 @@
       <p class="muted">CSV 형식은 <code>ledger.csv</code>(build_inventory.py 입력)와 같습니다.</p>
       <div class="btn-row">
         <label class="btn" for="file-csv">CSV 가져오기</label>
-        <input type="file" id="file-csv" accept=".csv,text/csv" hidden>
+        <!-- accept 를 두지 않음: 안드로이드는 카카오톡·드라이브에서 받은 CSV 를 text/csv 가 아닌 형식으로 보고 선택을 막는다 -->
+        <input type="file" id="file-csv" hidden>
         <button type="button" class="btn" id="btn-export">CSV 내보내기</button>
         <button type="button" class="btn" id="btn-print-all">전체 라벨 인쇄</button>
       </div>
