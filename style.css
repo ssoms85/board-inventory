@@ -262,3 +262,13 @@ details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; pa
 .add-form.general .r-idqty { order: 16; } .add-form.general .r-note { order: 17; } .add-form.general .r-labels { order: 19; }
 .add-form.general .b-only { display: none; }
 .add-form .r-scan { margin-top: 4px; }
+
+/* 카메라 (v1.3): 영상 + 인식 영역 안내 + 도구 버튼 */
+.cam-view { position: relative; aspect-ratio: 1 / 1; max-height: 60vh; margin: 0 auto; }
+.cam-view video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam .cam-view video { width: 100% !important; }
+.cam-guide { position: absolute; left: 4%; top: 12%; width: 92%; height: 76%; border: 2px solid rgba(255, 255, 255, .9); border-radius: 10px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .35); pointer-events: none; }
+.cam-tools { position: absolute; right: 8px; bottom: 8px; display: flex; gap: 8px; }
+.cam-btn { min-width: 44px; height: 44px; border-radius: 22px; border: 0; background: rgba(0, 0, 0, .55); color: #fff; font-size: 18px; font-weight: 700; cursor: pointer; }
+.cam-btn.on { background: #f5b301; color: #000; }
+.cam-box { overflow: hidden; }
