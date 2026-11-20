@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 const OUT_TYPES = ['팀내', '타팀', '외부', '증정'];
 const STATUSES = ['재고', '분출'];
 // 앞 13열은 ledger.csv(build_inventory.py 입력)와 같은 순서, 뒤 3열은 일반 제품용 품목 정보
@@ -1455,10 +1455,12 @@ function exportCsv(list = S.boards) {
   openModal(`<h3>CSV 내보내기</h3>
     <p class="muted">${esc(name)} · ${list.length}행</p>
     <div class="pick-list">
-      <button type="button" class="btn primary wide" id="csv-share">공유 (카카오톡 · 드라이브 · 메일)</button>
-      <button type="button" class="btn wide" id="csv-save">기기에 저장 (다운로드 폴더)</button>
+      <button type="button" class="btn primary wide" id="csv-save">기기에 저장 (다운로드 폴더)</button>
+      <button type="button" class="btn wide" id="csv-share">공유 (드라이브 · 메일 등)</button>
     </div>
-    <p class="muted">저장한 파일은 '내 파일 → 다운로드'에 있습니다. 저장이 안 되면 공유로 보내세요.</p>`);
+    <p class="muted">저장한 파일은 '내 파일 → 다운로드'에 있습니다.<br>
+    카카오톡으로 보낼 때는 '공유'가 아니라, 저장한 뒤 카톡 채팅방의 <b>+ → 파일</b>에서 다운로드 폴더의 CSV 를 고르세요.
+    (카카오톡은 '공유'로 받은 CSV 를 지원하지 않는 파일로 막습니다)</p>`);
   $('#csv-share').addEventListener('click', async () => {
     try { await navigator.share({ files: [file], title: name }); closeModal(); toast('공유했습니다', 'ok'); }
     catch (e) { if (e.name !== 'AbortError') toast('공유 실패: ' + e.message, 'err'); }
