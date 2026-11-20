@@ -5,7 +5,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.4.0';
 const OUT_TYPES = ['팀내', '타팀', '외부', '증정'];
 const STATUSES = ['재고', '분출'];
 // 앞 13열은 ledger.csv(build_inventory.py 입력)와 같은 순서, 뒤 3열은 일반 제품용 품목 정보
@@ -83,7 +83,8 @@ const S = {
   listFilter: 'all',
 };
 const persist = () => { save(LS.boards, S.boards); save(LS.history, S.history); save(LS.outbox, S.outbox); };
-const isSheet = () => S.settings.mode === 'sheet' && S.settings.url && S.settings.token;
+// 토큰은 선택: 시트(Apps Script)에 APP_TOKEN 이 설정돼 있을 때만 필요
+const isSheet = () => S.settings.mode === 'sheet' && !!S.settings.url;
 const byId = (id) => S.boards.find((b) => up(b.id) === up(id));
 const sortBoards = () => S.boards.sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }));
 
@@ -179,7 +180,7 @@ async function flush() {
         persist();
         continue;
       }
-      if (r.error === 'auth') { setSync('error', '토큰이 맞지 않습니다 (설정 확인)'); return; }
+      if (r.error === 'auth') { setSync('error', AUTH_MSG); return; }
       // 충돌·중복 등: 이 작업은 버리고 시트 기준으로 다시 맞춘다.
       S.outbox.shift();
       persist();
@@ -206,7 +207,7 @@ async function pull() {
   setSync('busy');
   let r;
   try { r = await Api.call({ action: 'list' }); } catch (e) { setSync(e.kind === 'network' ? 'offline' : 'error', e.message); return; }
-  if (!r.ok) { setSync('error', r.error === 'auth' ? '토큰이 맞지 않습니다 (설정 확인)' : (r.message || r.error)); return; }
+  if (!r.ok) { setSync('error', r.error === 'auth' ? AUTH_MSG : (r.message || r.error)); return; }
   if (S.outbox.length) return flush(); // 받는 사이 새 작업이 생김
   S.boards = (r.boards || []).map(normBoard);
   sortBoards();
@@ -1331,7 +1332,7 @@ async function saveSettings(e) {
   e.preventDefault();
   const prev = S.settings;
   const next = readSettingsForm();
-  if (next.mode === 'sheet' && (!next.url || !next.token)) return toast('Apps Script URL 과 토큰을 입력하세요', 'err');
+  if (next.mode === 'sheet' && !next.url) return toast('Apps Script 웹 앱 URL 을 입력하세요', 'err');
   const switching = next.mode === 'sheet' && (prev.mode !== 'sheet' || prev.url !== next.url);
   if (switching && S.boards.length && !confirm('Google 시트 연동으로 바꾸면 이 기기의 대장을 시트 내용으로 바꿉니다.\n(시트에 없는 이 기기 데이터는 먼저 CSV 로 내보내 두세요)\n계속할까요?')) return;
   S.settings = next;
@@ -1345,27 +1346,27 @@ async function saveSettings(e) {
 }
 async function testConnection() {
   const next = readSettingsForm();
-  if (!next.url || !next.token) return toast('URL 과 토큰을 입력하세요', 'err');
+  if (!next.url) return toast('Apps Script 웹 앱 URL 을 입력하세요', 'err');
   const keep = S.settings;
   S.settings = Object.assign({}, keep, { url: next.url, token: next.token });
   try {
     const r = await Api.call({ action: 'ping' }, 20000);
     if (r.ok) toast(`연결 성공 — 시트 "${r.sheet}" 보드 ${r.count}대`, 'ok', 5000);
-    else toast(r.error === 'auth' ? '토큰이 맞지 않습니다' : `오류: ${r.message || r.error}`, 'err', 5000);
+    else toast(r.error === 'auth' ? AUTH_MSG : `오류: ${r.message || r.error}`, 'err', 8000);
   } catch (e) { toast(e.message, 'err', 5000); }
   finally { S.settings = keep; }
 }
 function showShareQr() {
   const s = readSettingsForm();
-  if (!s.url || !s.token) return toast('URL 과 토큰을 먼저 입력하세요', 'err');
-  const payload = b64url(JSON.stringify({ u: s.url, t: s.token }));
+  if (!s.url) return toast('Apps Script 웹 앱 URL 을 먼저 입력하세요', 'err');
+  const payload = b64url(JSON.stringify(s.token ? { u: s.url, t: s.token } : { u: s.url }));
   const link = location.origin + location.pathname + '#setup=' + payload;
   const qr = qrcode(0, 'L');
   qr.addData(link);
   qr.make();
   const box = $('#share-qr');
   box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true }) +
-    `<p class="small">팀원 휴대폰 카메라로 찍으면 앱이 열리고 연동 설정이 채워집니다.<br><b>토큰이 들어 있으니 팀 밖으로 공유하지 마세요.</b></p>
+    `<p class="small">팀원 휴대폰 카메라로 찍으면 앱이 열리고 연동 설정이 채워집니다.<br><b>이 QR·링크만 있으면 시트를 읽고 쓸 수 있으니 팀 밖으로 공유하지 마세요.</b></p>
      <button type="button" class="btn small" id="btn-copy-link">링크 복사</button>`;
   box.hidden = false;
   $('#btn-copy-link').onclick = () => navigator.clipboard?.writeText(link).then(() => toast('링크 복사됨', 'ok'), () => toast('복사 실패', 'err'));
@@ -1379,14 +1380,16 @@ function checkSetupLink() {
   history.replaceState(null, '', location.pathname + location.search);
   try {
     const o = JSON.parse(unb64url(m[1]));
-    if (!o.u || !o.t) throw new Error();
-    S.settings = Object.assign({}, S.settings, { mode: 'sheet', url: o.u, token: o.t });
+    if (!o.u) throw new Error();
+    S.settings = Object.assign({}, S.settings, { mode: 'sheet', url: o.u, token: o.t || '' });
     save(LS.settings, S.settings);
     S.outbox = [];
     persist();
     toast('Google 시트 연동이 설정되었습니다. 설정 탭에서 이름을 입력하세요.', 'ok', 6000);
   } catch { toast('설정 링크가 올바르지 않습니다', 'err'); }
 }
+
+const AUTH_MSG = '시트가 접근 토큰을 요구합니다 — Apps Script 를 새 Code.gs 로 바꿔 다시 배포하거나, 설정에 토큰을 입력하세요';
 
 /* ------------------------------------------------------------------ CSV */
 // 구분자: 첫 줄에 가장 많이 나오는 것 (엑셀 '유니코드 텍스트'는 탭, 유럽식 설정은 세미콜론)
